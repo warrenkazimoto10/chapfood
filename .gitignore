@@ -1,0 +1,22 @@
+# Fichiers sensibles - NE PAS PUSHER
+.env
+.env.local
+.env.*.local
+*.env
+
+# Dépendances
+node_modules/
+
+# Build / cache
+.dart_tool/
+.pub-cache/
+.pub/
+build/
+dist/
+*.log
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.iml

@@ -1,0 +1,155 @@
+/* Styles personnalisés pour les scrollbars */
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(209 213 219) rgb(243 244 246);
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: rgb(243 244 246);
+  border-radius: 3px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: rgb(209 213 219);
+  border-radius: 3px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: rgb(156 163 175);
+}
+
+/* Styles pour le panneau de droite */
+.delivery-panel {
+  max-height: 100vh;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgb(209 213 219) rgb(243 244 246);
+}
+
+.delivery-panel::-webkit-scrollbar {
+  width: 8px;
+}
+
+.delivery-panel::-webkit-scrollbar-track {
+  background: rgb(248 250 252);
+  border-radius: 4px;
+}
+
+.delivery-panel::-webkit-scrollbar-thumb {
+  background: rgb(203 213 225);
+  border-radius: 4px;
+  border: 1px solid rgb(248 250 252);
+}
+
+.delivery-panel::-webkit-scrollbar-thumb:hover {
+  background: rgb(148 163 184);
+}
+
+/* Animation pour le scroll */
+.delivery-panel {
+  scroll-behavior: smooth;
+}
+
+/* Styles pour les cartes dans le panneau */
+.delivery-panel .card {
+  scroll-margin-top: 1rem;
+  scroll-margin-bottom: 1rem;
+}
+
+/* Animations pour le tracé de route */
+@keyframes routePulse {
+  0% {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
+  100% {
+    stroke-dashoffset: -10;
+    opacity: 1;
+  }
+}
+
+@keyframes routeGlow {
+  0%, 100% {
+    filter: drop-shadow(0 0 5px rgba(59, 130, 246, 0.5));
+  }
+  50% {
+    filter: drop-shadow(0 0 15px rgba(59, 130, 246, 0.8));
+  }
+}
+
+@keyframes routeFlow {
+  0% {
+    stroke-dashoffset: 0;
+  }
+  100% {
+    stroke-dashoffset: -20;
+  }
+}
+
+/* Styles pour les marqueurs animés */
+@keyframes markerPulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.1);
+    opacity: 0.8;
+  }
+}
+
+@keyframes markerBounce {
+  0%, 20%, 50%, 80%, 100% {
+    transform: translateY(0);
+  }
+  40% {
+    transform: translateY(-10px);
+  }
+  60% {
+    transform: translateY(-5px);
+  }
+}
+
+/* Animation pour le bouton de retour en haut */
+@keyframes slideUp {
+  from {
+    transform: translateY(100px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.scroll-top-button {
+  animation: slideUp 0.3s ease-out;
+}
+
+/* Animation pour les cartes d'information */
+@keyframes fadeInUp {
+  from {
+    transform: translateY(20px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.delivery-panel .card {
+  animation: fadeInUp 0.5s ease-out;
+}
+
+.delivery-panel .card:nth-child(1) { animation-delay: 0.1s; }
+.delivery-panel .card:nth-child(2) { animation-delay: 0.2s; }
+.delivery-panel .card:nth-child(3) { animation-delay: 0.3s; }
+.delivery-panel .card:nth-child(4) { animation-delay: 0.4s; }

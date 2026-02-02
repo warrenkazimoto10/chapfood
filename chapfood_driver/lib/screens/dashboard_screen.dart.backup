@@ -1,0 +1,1042 @@
+import 'dart:async';
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart';
+import 'package:geolocator/geolocator.dart' as geo;
+import '../services/session_service.dart';
+import '../services/active_delivery_service.dart';
+import '../services/state_persistence_service.dart';
+import '../services/order_status_service.dart';
+import '../services/order_service.dart';
+import '../services/driver_location_service.dart';
+import '../models/order_model.dart';
+import '../models/driver_model.dart';
+import '../models/active_delivery_state.dart';
+import '../widgets/order_notification_bottom_sheet.dart';
+import '../widgets/map/directional_marker.dart';
+import '../widgets/map/mapbox_map_widget.dart';
+import '../widgets/map/mapbox_directional_marker.dart';
+import '../config/mapbox_config.dart';
+import '../widgets/dashboard/status_card.dart';
+import '../widgets/dashboard/customer_service_modal.dart';
+import 'active_delivery_screen.dart';
+
+/// Écran principal du dashboard du livreur
+/// Gère la restauration automatique de l'état et redirige vers active_delivery_screen si nécessaire
+class DashboardScreen extends StatefulWidget {
+  const DashboardScreen({super.key});
+
+  @override
+  State<DashboardScreen> createState() => _DashboardScreenState();
+}
+
+class _DashboardScreenState extends State<DashboardScreen> {
+  bool _isInitializing = true;
+  bool _isDriverAvailable = true;
+  DriverModel? _currentDriver;
+  StreamSubscription<OrderModel>? _orderSubscription;
+  StreamSubscription<List<OrderModel>>? _availableOrdersSubscription;
+
+  // Commandes temporairement masquées (refusées par ce livreur)
+  final Map<int, DateTime> _dismissedOrders = {};
+
+  // État pour la carte
+  MapboxMap? _mapboxMap;
+  MapboxAnnotationHelper? _annotationHelper;
+  MapboxCameraHelper? _cameraHelper;
+  geo.Position? _currentPosition;
+  geo.Position? _previousPosition; // Pour calculer le bearing
+  double? _currentBearing; // Direction en degrés
+  StreamSubscription<geo.Position>? _positionSubscription;
+
+  // État de livraison
+  bool _isOnDelivery = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeDashboard();
+  }
+
+  /// Rafraîchir le dashboard (vérifier les livraisons actives)
+  Future<void> _refreshDashboard() async {
+    print('🔄 Rafraîchissement du dashboard...');
+
+    if (_currentDriver == null) {
+      print('⚠️ Aucun livreur connecté');
+      return;
+    }
+
+    try {
+      // Afficher un indicateur de chargement
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Row(
+            children: [
+              SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              SizedBox(width: 12),
+              Text('Actualisation en cours...'),
+            ],
+          ),
+          duration: Duration(seconds: 2),
+        ),
+      );
+
+      // 1. Nettoyer l'état sauvegardé et vérifier depuis la DB
+      await StatePersistenceService.clearActiveDelivery();
+      print('🧹 État sauvegardé nettoyé pour forcer la vérification');
+
+      // 2. Vérifier directement dans la DB pour une livraison active
+      OrderModel? activeOrder;
+      try {
+        activeOrder =
+            await ActiveDeliveryService.getActiveDelivery(
+              _currentDriver!.id,
+            ).timeout(
+              const Duration(seconds: 10),
+              onTimeout: () {
+                print('⚠️ Timeout lors de la vérification');
+                return null;
+              },
+            );
+
+        // Mettre à jour l'état de livraison
+        if (mounted) {
+          setState(() {
+            _isOnDelivery = activeOrder != null;
+          });
+        }
+      } catch (e) {
+        print('❌ Erreur lors de la vérification: $e');
+        activeOrder = null;
+      }
+
+      if (activeOrder != null) {
+        // Sauvegarder l'état et rediriger
+        final state = ActiveDeliveryState.fromOrder(activeOrder);
+        await StatePersistenceService.saveActiveDelivery(state);
+        print('✅ Livraison active trouvée: #${activeOrder.id}');
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).hideCurrentSnackBar();
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Livraison active trouvée'),
+              backgroundColor: Colors.green,
+              duration: Duration(seconds: 2),
+            ),
+          );
+          _navigateToActiveDelivery(activeOrder);
+        }
+      } else {
+        // Aucune livraison active
+        print('ℹ️ Aucune livraison active trouvée');
+        if (mounted) {
+          ScaffoldMessenger.of(context).hideCurrentSnackBar();
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Aucune livraison active'),
+              backgroundColor: Colors.blue,
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      print('❌ Erreur lors du rafraîchissement: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Erreur lors de l\'actualisation: ${e.toString()}'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    }
+  }
+
+  /// Initialisation du dashboard avec restauration de l'état
+  Future<void> _initializeDashboard() async {
+    print('🚀 Début de l\'initialisation du dashboard...');
+    try {
+      setState(() {
+        _isInitializing = true;
+      });
+
+      // 1. Vérifier la session
+      print('👤 Vérification de la session...');
+      final driver = await SessionService.getCurrentDriver();
+      if (driver == null) {
+        print('⚠️ Aucun livreur connecté, redirection vers login');
+        if (mounted) {
+          setState(() {
+            _isInitializing = false;
+          });
+          context.go('/login');
+        }
+        return;
+      }
+
+      print('✅ Livreur connecté: ${driver.id}');
+      setState(() {
+        _currentDriver = driver;
+        _isDriverAvailable = driver.isAvailable;
+      });
+
+      // 2. Restaurer l'état de livraison active depuis le stockage local
+      print('💾 Vérification de l\'état sauvegardé...');
+      final savedState = await StatePersistenceService.restoreActiveDelivery();
+
+      if (savedState != null) {
+        print('📦 État sauvegardé trouvé pour commande #${savedState.orderId}');
+        // 3. Vérifier la cohérence avec la DB
+        final isValid = await StatePersistenceService.validateActiveDelivery(
+          savedState.orderId,
+        );
+
+        if (isValid) {
+          // Récupérer la commande depuis la DB avec timeout
+          print('🔍 Récupération de la commande depuis la DB...');
+          OrderModel? activeOrder;
+          try {
+            activeOrder =
+                await ActiveDeliveryService.getActiveDelivery(
+                  driver.id,
+                ).timeout(
+                  const Duration(seconds: 10),
+                  onTimeout: () {
+                    print(
+                      '⚠️ Timeout lors de la récupération de la commande active',
+                    );
+                    return null;
+                  },
+                );
+          } catch (e) {
+            print('❌ Erreur lors de la récupération de la commande: $e');
+            activeOrder = null;
+          }
+
+          print(
+            '🔍 État sauvegardé trouvé, commande active: ${activeOrder?.id}',
+          );
+
+          if (activeOrder != null && mounted) {
+            print('✅ Redirection vers active-delivery depuis état sauvegardé');
+            // Mettre à jour l'état avant de rediriger
+            final orderToNavigate =
+                activeOrder; // Variable locale pour éviter le problème de null
+            setState(() {
+              _isInitializing = false;
+            });
+            // Rediriger vers l'écran de livraison active
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) {
+                _navigateToActiveDelivery(orderToNavigate);
+              }
+            });
+            return;
+          } else {
+            print('⚠️ Commande active non trouvée, nettoyage de l\'état...');
+            await StatePersistenceService.clearActiveDelivery();
+          }
+        } else {
+          print('⚠️ État sauvegardé invalide, nettoyage...');
+          // État invalide, nettoyer
+          await StatePersistenceService.clearActiveDelivery();
+        }
+      } else {
+        print('ℹ️ Aucun état sauvegardé trouvé');
+      }
+
+      // Pas d'état sauvegardé ou état invalide, vérifier directement dans la DB
+      print('🔍 Vérification directe dans la DB pour une livraison active...');
+      OrderModel? activeOrder;
+      try {
+        activeOrder = await ActiveDeliveryService.getActiveDelivery(driver.id)
+            .timeout(
+              const Duration(seconds: 10),
+              onTimeout: () {
+                print(
+                  '⚠️ Timeout lors de la vérification de la livraison active',
+                );
+                return null;
+              },
+            );
+
+        // Mettre à jour l'état de livraison
+        if (mounted) {
+          setState(() {
+            _isOnDelivery = activeOrder != null;
+          });
+        }
+        print('📦 Commande active trouvée: ${activeOrder?.id}');
+      } catch (e) {
+        print('❌ Erreur lors de la vérification de la livraison active: $e');
+        activeOrder = null;
+      }
+
+      if (activeOrder != null && mounted) {
+        // Sauvegarder l'état
+        final orderToNavigate =
+            activeOrder; // Variable locale pour éviter le problème de null
+        final state = ActiveDeliveryState.fromOrder(orderToNavigate);
+        await StatePersistenceService.saveActiveDelivery(state);
+        print('💾 État sauvegardé pour commande #${orderToNavigate.id}');
+
+        // Mettre à jour l'état avant de rediriger
+        setState(() {
+          _isInitializing = false;
+        });
+
+        // Rediriger vers l'écran de livraison active
+        print('✅ Redirection vers active-delivery depuis DB');
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) {
+            _navigateToActiveDelivery(orderToNavigate);
+          }
+        });
+        return;
+      } else {
+        print('ℹ️ Aucune livraison active trouvée');
+      }
+
+      // 4. Pas de livraison active, afficher le dashboard normal
+      print('✅ Initialisation du dashboard normal...');
+      if (mounted) {
+        setState(() {
+          _isInitializing = false;
+        });
+      }
+
+      // Démarrer le suivi GPS (ne pas bloquer si ça échoue)
+      print('📍 Démarrage du suivi GPS...');
+      try {
+        await DriverLocationService.startLocationTracking(driver.id);
+        print('✅ Suivi GPS démarré');
+      } catch (e) {
+        print('⚠️ Erreur lors du démarrage du suivi GPS: $e');
+        // Continuer même si le GPS échoue
+      }
+
+      // Obtenir la position initiale (avec timeout)
+      try {
+        _currentPosition = await DriverLocationService.getCurrentPosition()
+            .timeout(
+              const Duration(seconds: 10),
+              onTimeout: () {
+                print(
+                  '⚠️ Timeout lors de la récupération de la position initiale',
+                );
+                return null;
+              },
+            );
+        if (_currentPosition != null) {
+          print(
+            '📍 Position initiale obtenue: ${_currentPosition!.latitude}, ${_currentPosition!.longitude}',
+          );
+        } else {
+          print('⚠️ Position initiale non disponible');
+        }
+      } catch (e) {
+        print('⚠️ Erreur lors de la récupération de la position: $e');
+        _currentPosition = null;
+      }
+
+      // Écouter les mises à jour de position pour la carte
+      _startListeningToPosition();
+
+      // Écouter les nouvelles commandes disponibles
+      _startListeningToAvailableOrders();
+
+      print('✅ Initialisation du dashboard terminée');
+    } catch (e, stackTrace) {
+      print('❌ Erreur lors de l\'initialisation du dashboard: $e');
+      print('Stack trace: $stackTrace');
+      if (mounted) {
+        setState(() {
+          _isInitializing = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Erreur d\'initialisation: ${e.toString()}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _orderSubscription?.cancel();
+    _availableOrdersSubscription?.cancel();
+    _positionSubscription?.cancel();
+    // Ne pas arrêter le GPS ici car il doit continuer même sur le dashboard
+    super.dispose();
+  }
+
+  /// Écouter les mises à jour de position pour mettre à jour la carte
+  void _startListeningToPosition() {
+    // Mettre à jour périodiquement (toutes les 2 secondes pour plus de fluidité)
+    Timer.periodic(const Duration(seconds: 2), (timer) async {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      final position = await DriverLocationService.getCurrentPosition();
+      if (position != null && mounted) {
+        // Calculer la distance depuis la position précédente
+        double? distance;
+        if (_previousPosition != null) {
+          distance = geo.Geolocator.distanceBetween(
+            _previousPosition!.latitude,
+            _previousPosition!.longitude,
+            position.latitude,
+            position.longitude,
+          );
+
+          // Ne mettre à jour le bearing que si le livreur s'est déplacé d'au moins 10 mètres
+          // Cela évite que le marqueur bouge quand on est stationné
+          if (distance >= 10.0) {
+            _currentBearing = geo.Geolocator.bearingBetween(
+              _previousPosition!.latitude,
+              _previousPosition!.longitude,
+              position.latitude,
+              position.longitude,
+            );
+            // Normaliser à 0-360
+            if (_currentBearing! < 0) {
+              _currentBearing = _currentBearing! + 360;
+            }
+          }
+          // Si on est stationné (distance < 10m), garder le bearing précédent
+        }
+
+        // Ne mettre à jour le marqueur que si la position a vraiment changé (au moins 3 mètres)
+        // Cela évite les mises à jour inutiles qui causent des saccades
+        bool shouldUpdate = false;
+        if (_currentPosition == null) {
+          shouldUpdate = true; // Première position
+        } else {
+          final currentDistance = geo.Geolocator.distanceBetween(
+            _currentPosition!.latitude,
+            _currentPosition!.longitude,
+            position.latitude,
+            position.longitude,
+          );
+          shouldUpdate =
+              currentDistance >= 3.0; // Seuil de 3 mètres pour la fluidité
+        }
+
+        if (shouldUpdate) {
+          setState(() {
+            _previousPosition = _currentPosition;
+            _currentPosition = position;
+          });
+          _updateDriverMarkerOnMap();
+        }
+      }
+    });
+  }
+
+  /// Mettre à jour le marqueur du livreur sur la carte
+  Future<void> _updateDriverMarkerOnMap() async {
+    if (_mapboxMap == null || _annotationHelper == null || _currentPosition == null) {
+      return;
+    }
+
+    try {
+      // Créer l'image du marqueur directionnel
+      final bearing = _currentBearing ?? 0.0;
+      final markerImageBytes = await MapboxDirectionalMarker.createDirectionalMarkerImage(
+        color: Colors.blue,
+        bearing: bearing,
+        showPopup: false,
+      );
+
+      // Générer un ID unique pour cette image
+      final imageId = MapboxDirectionalMarker.generateMarkerId(
+        color: Colors.blue,
+        bearing: bearing,
+        showPopup: false,
+      );
+
+      // Ajouter l'image au style de la carte
+      await _mapboxMap!.style.addStyleImage(
+        imageId,
+        1.0,
+        markerImageBytes,
+        false,
+        [],
+        [],
+        null,
+      );
+
+      // Ajouter ou mettre à jour le marqueur
+      await _annotationHelper!.addOrUpdatePointAnnotation(
+        id: 'driver',
+        lat: _currentPosition!.latitude,
+        lng: _currentPosition!.longitude,
+        iconImage: imageId,
+        iconSize: 1.0,
+      );
+
+      print('✅ Marqueur livreur mis à jour');
+    } catch (e) {
+      print('❌ Erreur mise à jour marqueur: $e');
+    }
+  }
+
+  /// Naviguer vers l'écran de livraison active
+  void _navigateToActiveDelivery(OrderModel order) {
+    if (!mounted) {
+      print('⚠️ Widget non monté, navigation annulée');
+      return;
+    }
+
+    print('🚀 Navigation vers active-delivery avec commande #${order.id}');
+    print(
+      '📍 Order details: status=${order.status.value}, deliveryLat=${order.deliveryLat}, deliveryLng=${order.deliveryLng}',
+    );
+
+    try {
+      // Utiliser go pour remplacer complètement la route
+      context.go('/active-delivery', extra: order);
+      print('✅ Navigation effectuée vers /active-delivery');
+    } catch (e) {
+      print('❌ Erreur lors de la navigation: $e');
+      // Fallback: utiliser pushReplacement avec MaterialPageRoute
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(
+          builder: (context) => ActiveDeliveryScreen(order: order),
+        ),
+      );
+      print('✅ Navigation effectuée via MaterialPageRoute (fallback)');
+    }
+  }
+
+  /// Écouter les nouvelles commandes disponibles
+  void _startListeningToAvailableOrders() {
+    if (_currentDriver == null) return;
+
+    print('🔔 Démarrage de l\'écoute des commandes disponibles');
+    print('📊 Livreur disponible: $_isDriverAvailable');
+
+    _availableOrdersSubscription = OrderStatusService.watchAvailableOrders().listen(
+      (orders) {
+        print('📦 Commandes reçues: ${orders.length} commandes');
+        print('🔍 Livreur disponible: $_isDriverAvailable');
+
+        // Filtrer les commandes masquées récemment (moins de 2 minutes)
+        final now = DateTime.now();
+        final availableOrders = orders.where((order) {
+          final dismissedAt = _dismissedOrders[order.id];
+          if (dismissedAt != null) {
+            final timeSinceDismissed = now.difference(dismissedAt);
+            // Si moins de 2 minutes, ne pas afficher
+            if (timeSinceDismissed.inMinutes < 2) {
+              print('⏸️ Commande #${order.id} masquée récemment, ignorée');
+              return false;
+            } else {
+              // Plus de 2 minutes, retirer de la liste des masquées
+              _dismissedOrders.remove(order.id);
+              print('✅ Commande #${order.id} peut être réaffichée');
+            }
+          }
+          return true;
+        }).toList();
+
+        // Les commandes retournées sont déjà filtrées :
+        // - status == 'ready_for_delivery'
+        // - driver_id == null
+        if (availableOrders.isNotEmpty && _isDriverAvailable) {
+          print(
+            '✅ Affichage de la notification pour la commande #${availableOrders.first.id}',
+          );
+          // Afficher une notification pour la première commande disponible
+          _showNewOrderNotification(availableOrders.first);
+        } else {
+          if (availableOrders.isEmpty) {
+            print('⚠️ Aucune commande disponible (après filtrage)');
+          }
+          if (!_isDriverAvailable) {
+            print(
+              '⚠️ Livreur non disponible - Activez le switch dans le header',
+            );
+          }
+        }
+      },
+      onError: (error) {
+        print('❌ Erreur dans le stream de commandes: $error');
+      },
+    );
+
+    // Nettoyer périodiquement les commandes masquées anciennes (plus de 2 minutes)
+    Timer.periodic(const Duration(minutes: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      final now = DateTime.now();
+      _dismissedOrders.removeWhere((orderId, dismissedAt) {
+        final timeSinceDismissed = now.difference(dismissedAt);
+        return timeSinceDismissed.inMinutes >= 2;
+      });
+    });
+  }
+
+  /// Afficher une notification pour une nouvelle commande
+  void _showNewOrderNotification(OrderModel order) {
+    showModalBottomSheet(
+      context: context,
+      isDismissible: true, // Permettre de masquer en glissant vers le bas
+      enableDrag: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => OrderNotificationBottomSheet(
+        order: order,
+        onAccept: () {
+          // Ne pas masquer si la commande est acceptée
+          _acceptOrder(order);
+        },
+        onCancel: () {
+          // L'utilisateur a masqué la commande en glissant vers le bas
+          _dismissOrder(order.id);
+        },
+      ),
+    ).then((value) {
+      // Quand le bottom sheet est fermé (glissé vers le bas), masquer la commande
+      // onCancel sera appelé automatiquement par le widget
+    });
+  }
+
+  /// Masquer une commande temporairement (2 minutes)
+  void _dismissOrder(int orderId) {
+    setState(() {
+      _dismissedOrders[orderId] = DateTime.now();
+    });
+    print(
+      '⏸️ Commande #$orderId masquée, réaffichage dans 2 minutes si non acceptée',
+    );
+  }
+
+  /// Accepter une commande
+  Future<void> _acceptOrder(OrderModel order) async {
+    if (_currentDriver == null) return;
+
+    try {
+      // Vérifier qu'il n'y a pas déjà une livraison active
+      final activeDelivery = await ActiveDeliveryService.getActiveDelivery(
+        _currentDriver!.id,
+      );
+
+      // Mettre à jour l'état de livraison
+      if (mounted) {
+        setState(() {
+          _isOnDelivery = activeDelivery != null;
+        });
+      }
+
+      if (activeDelivery != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Vous avez déjà une livraison en cours'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+        return;
+      }
+
+      // Accepter la commande
+      final accepted = await OrderService.acceptOrder(
+        order.id,
+        _currentDriver!.id,
+      );
+
+      if (accepted) {
+        // Récupérer la commande mise à jour
+        final updatedOrder = await OrderService.getOrderDetails(order.id);
+
+        if (updatedOrder != null) {
+          print('✅ Commande acceptée avec succès: #${updatedOrder.id}');
+
+          // Mettre à jour l'état de livraison
+          if (mounted) {
+            setState(() {
+              _isOnDelivery = true;
+            });
+          }
+
+          // Sauvegarder l'état
+          final state = ActiveDeliveryState.fromOrder(updatedOrder);
+          await StatePersistenceService.saveActiveDelivery(state);
+          print('💾 État sauvegardé pour commande #${updatedOrder.id}');
+
+          // Rediriger vers l'écran de livraison active
+          if (mounted) {
+            print('🚀 Navigation vers active-delivery...');
+            _navigateToActiveDelivery(updatedOrder);
+          }
+        } else {
+          print('❌ Commande acceptée mais impossible de récupérer les détails');
+        }
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Cette commande a déjà été acceptée par un autre livreur',
+            ),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } catch (e) {
+      print('❌ Erreur lors de l\'acceptation de la commande: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Erreur: $e'), backgroundColor: Colors.red),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_isInitializing) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+
+    return Scaffold(
+      // Pas d'AppBar, on utilise un header personnalisé
+      body: Stack(
+        children: [
+          // CARTE PLEIN ÉCRAN
+          _buildMapView(),
+
+          // OVERLAY SI INDISPONIBLE (en dessous du header)
+          if (!_isDriverAvailable) _buildUnavailableOverlay(),
+
+          // NOUVEAU HEADER (menu gauche, statut centre, service client droite)
+          _buildNewHeader(),
+
+          // BOUTON POUR ACTUALISER (en bas à gauche)
+          Positioned(
+            bottom: 20,
+            left: 20,
+            child: Container(
+              decoration: BoxDecoration(
+                color: Colors.white,
+                shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.2),
+                    blurRadius: 8,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: IconButton(
+                icon: const Icon(Icons.refresh),
+                color: Colors.blue[700],
+                onPressed: _refreshDashboard,
+                tooltip: 'Actualiser',
+              ),
+            ),
+          ),
+
+          // BOUTON POUR RECENTRER LA CARTE (en bas à droite)
+          if (_mapController != null)
+            Positioned(
+              bottom: 20,
+              right: 20,
+              child: Container(
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.2),
+                      blurRadius: 8,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: IconButton(
+                  icon: Icon(Icons.my_location, color: Colors.blue[700]),
+                  onPressed: _centerMapOnDriverPosition,
+                  tooltip: 'Recentrer la carte',
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// Carte Google Maps plein écran
+  Widget _buildMapView() {
+    return GoogleMap(
+      mapType: MapType.normal,
+      initialCameraPosition: CameraPosition(
+        target: LatLng(
+          _currentPosition?.latitude ?? 5.3600,
+          _currentPosition?.longitude ?? -4.0083,
+        ),
+        zoom: 15.0,
+      ),
+      markers: _markers,
+      onMapCreated: _onMapCreated,
+      myLocationEnabled:
+          false, // Désactivé pour éviter le doublon avec notre marqueur personnalisé
+      myLocationButtonEnabled: false,
+    );
+  }
+
+  /// Initialisation de la carte
+  Future<void> _onMapCreated(GoogleMapController controller) async {
+    _mapController = controller;
+
+    try {
+      // Si on a déjà une position, ajouter le marqueur et centrer
+      if (_currentPosition != null) {
+        await _updateDriverMarkerOnMap();
+        // Centrer la carte sur la position du livreur au chargement
+        await Future.delayed(const Duration(milliseconds: 500));
+        await _centerMapOnDriverPosition();
+      } else {
+        // Attendre un peu et réessayer si la position n'est pas encore disponible
+        Future.delayed(const Duration(seconds: 1), () async {
+          if (mounted && _currentPosition == null) {
+            final position = await DriverLocationService.getCurrentPosition();
+            if (position != null && mounted) {
+              setState(() {
+                _currentPosition = position;
+              });
+              await _updateDriverMarkerOnMap();
+              await Future.delayed(const Duration(milliseconds: 500));
+              await _centerMapOnDriverPosition();
+            }
+          }
+        });
+      }
+    } catch (e) {
+      print('❌ Erreur initialisation carte: $e');
+    }
+  }
+
+  /// Créer un marqueur directionnel avec halo (sans popup)
+  Future<BitmapDescriptor> _createDirectionalMarker() async {
+    final bearing =
+        _currentBearing ?? 0.0; // Utiliser le bearing calculé ou 0 par défaut
+    return await DirectionalMarker.createDirectionalMarker(
+      color: Colors.blue,
+      bearing: bearing,
+      showPopup: false,
+    );
+  }
+
+  /// Centrer la carte sur la position du livreur
+  Future<void> _centerMapOnDriverPosition() async {
+    // Obtenir la position actuelle si elle n'est pas disponible
+    if (_currentPosition == null) {
+      final position = await DriverLocationService.getCurrentPosition();
+      if (position != null && mounted) {
+        setState(() {
+          _currentPosition = position;
+        });
+      } else {
+        print('⚠️ Position non disponible pour centrer la carte');
+        return;
+      }
+    }
+
+    if (_mapController == null || _currentPosition == null) {
+      print('⚠️ Carte ou position non disponible');
+      return;
+    }
+
+    try {
+      print(
+        '📍 Centrage de la carte sur: ${_currentPosition!.latitude}, ${_currentPosition!.longitude}',
+      );
+
+      await _mapController!.animateCamera(
+        CameraUpdate.newLatLngZoom(
+          LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
+          15.0,
+        ),
+      );
+
+      print('✅ Carte centrée sur la position du livreur');
+
+      // Afficher un feedback visuel
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Carte recentrée sur votre position'),
+            duration: Duration(seconds: 1),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      print('❌ Erreur centrage carte: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Erreur lors du centrage: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  /// Nouveau header avec menu gauche, statut centre, service client droite
+  Widget _buildNewHeader() {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            // Bouton menu à gauche
+            Container(
+              decoration: BoxDecoration(
+                color: Colors.white,
+                shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.1),
+                    blurRadius: 8,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: IconButton(
+                icon: const Icon(Icons.menu),
+                onPressed: () {
+                  // TODO: Ouvrir le menu latéral
+                  Scaffold.of(context).openDrawer();
+                },
+                color: Colors.black87,
+              ),
+            ),
+
+            // Card statut au centre
+            StatusCard(
+              isAvailable: _isDriverAvailable,
+              isOnDelivery: _isOnDelivery,
+              onToggle: _isOnDelivery ? null : _toggleAvailability,
+              canToggle: !_isOnDelivery,
+            ),
+
+            // Bouton service client à droite
+            Container(
+              decoration: BoxDecoration(
+                color: Colors.white,
+                shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.1),
+                    blurRadius: 8,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: IconButton(
+                icon: const Icon(Icons.headset_mic),
+                onPressed: _showCustomerServiceModal,
+                color: Colors.black87,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Afficher le modal de service client
+  void _showCustomerServiceModal() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => const CustomerServiceModal(),
+    );
+  }
+
+  /// Overlay si le livreur est indisponible
+  Widget _buildUnavailableOverlay() {
+    return Container(
+      color: Colors.black.withOpacity(0.7),
+      child: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.pause_circle_outline,
+              size: 80,
+              color: Colors.white.withOpacity(0.8),
+            ),
+            const SizedBox(height: 20),
+            const Text(
+              'Mode Indisponible',
+              style: TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+                color: Colors.white,
+              ),
+            ),
+            const SizedBox(height: 10),
+            const Text(
+              'Vous ne recevrez pas de nouvelles commandes',
+              style: TextStyle(fontSize: 16, color: Colors.white70),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Toggle la disponibilité du livreur
+  Future<void> _toggleAvailability(bool value) async {
+    if (_currentDriver == null) return;
+
+    try {
+      final supabase = Supabase.instance.client;
+      await supabase
+          .from('drivers')
+          .update({
+            'is_available': value,
+            'updated_at': DateTime.now().toIso8601String(),
+          })
+          .eq('id', _currentDriver!.id);
+
+      setState(() {
+        _isDriverAvailable = value;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            value
+                ? 'Vous êtes maintenant disponible'
+                : 'Vous êtes maintenant indisponible',
+          ),
+          backgroundColor: value ? Colors.green : Colors.orange,
+        ),
+      );
+    } catch (e) {
+      print('❌ Erreur lors de la mise à jour de la disponibilité: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Erreur: $e'), backgroundColor: Colors.red),
+      );
+    }
+  }
+}
