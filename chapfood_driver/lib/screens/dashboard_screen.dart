@@ -1,8 +1,9 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart';
 import 'package:geolocator/geolocator.dart' as geo;
 import '../services/session_service.dart';
 import '../services/active_delivery_service.dart';
@@ -14,10 +15,8 @@ import '../models/order_model.dart';
 import '../models/driver_model.dart';
 import '../models/active_delivery_state.dart';
 import '../widgets/order_notification_bottom_sheet.dart';
-import '../widgets/map/directional_marker.dart';
-import '../widgets/map/mapbox_map_widget.dart';
-import '../widgets/map/mapbox_directional_marker.dart';
-import '../config/mapbox_config.dart';
+import '../widgets/map/osm_map_widget.dart';
+import '../config/osm_config.dart';
 import '../widgets/dashboard/status_card.dart';
 import '../widgets/dashboard/customer_service_modal.dart';
 import 'active_delivery_screen.dart';
@@ -41,13 +40,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
   // Commandes temporairement masquÃ©es (refusÃ©es par ce livreur)
   final Map<int, DateTime> _dismissedOrders = {};
 
-  // Ã‰tat pour la carte
-  MapboxMap? _mapboxMap;
-  MapboxAnnotationHelper? _annotationHelper;
-  MapboxCameraHelper? _cameraHelper;
+  // État pour la carte OSM
+  MapController? _mapController;
   geo.Position? _currentPosition;
-  geo.Position? _previousPosition; // Pour calculer le bearing
-  double? _currentBearing; // Direction en degrÃ©s
+  geo.Position? _previousPosition;
+  double? _currentBearing;
   StreamSubscription<geo.Position>? _positionSubscription;
 
   // Ã‰tat de livraison
@@ -195,7 +192,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
       final savedState = await StatePersistenceService.restoreActiveDelivery();
 
       if (savedState != null) {
-        print('ðŸ“¦ Ã‰tat sauvegardÃ© trouvÃ© pour commande #${savedState.orderId}');
+        print(
+          'ðŸ“¦ Ã‰tat sauvegardÃ© trouvÃ© pour commande #${savedState.orderId}',
+        );
         // 3. VÃ©rifier la cohÃ©rence avec la DB
         final isValid = await StatePersistenceService.validateActiveDelivery(
           savedState.orderId,
@@ -228,7 +227,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
           );
 
           if (activeOrder != null && mounted) {
-            print('âœ… Redirection vers active-delivery depuis Ã©tat sauvegardÃ©');
+            print(
+              'âœ… Redirection vers active-delivery depuis Ã©tat sauvegardÃ©',
+            );
             // Mettre Ã  jour l'Ã©tat avant de rediriger
             final orderToNavigate =
                 activeOrder; // Variable locale pour Ã©viter le problÃ¨me de null
@@ -243,7 +244,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
             });
             return;
           } else {
-            print('âš ï¸ Commande active non trouvÃ©e, nettoyage de l\'Ã©tat...');
+            print(
+              'âš ï¸ Commande active non trouvÃ©e, nettoyage de l\'Ã©tat...',
+            );
             await StatePersistenceService.clearActiveDelivery();
           }
         } else {
@@ -256,7 +259,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
       }
 
       // Pas d'Ã©tat sauvegardÃ© ou Ã©tat invalide, vÃ©rifier directement dans la DB
-      print('ðŸ” VÃ©rification directe dans la DB pour une livraison active...');
+      print(
+        'ðŸ” VÃ©rification directe dans la DB pour une livraison active...',
+      );
       OrderModel? activeOrder;
       try {
         activeOrder = await ActiveDeliveryService.getActiveDelivery(driver.id)
@@ -327,16 +332,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
       // Obtenir la position initiale (avec timeout)
       try {
-        _currentPosition = await DriverLocationService.getCurrentPosition()
-            .timeout(
-              const Duration(seconds: 10),
-              onTimeout: () {
-                print(
-                  'âš ï¸ Timeout lors de la rÃ©cupÃ©ration de la position initiale',
-                );
-                return null;
-              },
+        _currentPosition = await DriverLocationService.getCurrentPosition().timeout(
+          const Duration(seconds: 10),
+          onTimeout: () {
+            print(
+              'âš ï¸ Timeout lors de la rÃ©cupÃ©ration de la position initiale',
             );
+            return null;
+          },
+        );
         if (_currentPosition != null) {
           print(
             'ðŸ“ Position initiale obtenue: ${_currentPosition!.latitude}, ${_currentPosition!.longitude}',
@@ -440,58 +444,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
             _previousPosition = _currentPosition;
             _currentPosition = position;
           });
-          _updateDriverMarkerOnMap();
+          setState(() {});
         }
       }
     });
   }
 
   /// Mettre Ã  jour le marqueur du livreur sur la carte
-  Future<void> _updateDriverMarkerOnMap() async {
-    if (_mapboxMap == null || _annotationHelper == null || _currentPosition == null) {
-      return;
-    }
-
-    try {
-      // CrÃ©er l'image du marqueur directionnel
-      final bearing = _currentBearing ?? 0.0;
-      final markerImageBytes = await MapboxDirectionalMarker.createDirectionalMarkerImage(
-        color: Colors.blue,
-        bearing: bearing,
-        showPopup: false,
-      );
-
-      // GÃ©nÃ©rer un ID unique pour cette image
-      final imageId = MapboxDirectionalMarker.generateMarkerId(
-        color: Colors.blue,
-        bearing: bearing,
-        showPopup: false,
-      );
-
-      // Ajouter l'image au style de la carte
-      await _mapboxMap!.style.addStyleImage(
-        imageId,
-        1.0,
-        markerImageBytes,
-        false,
-        [],
-        [],
-        null,
-      );
-
-      // Ajouter ou mettre Ã  jour le marqueur
-      await _annotationHelper!.addOrUpdatePointAnnotation(
-        id: 'driver',
-        lat: _currentPosition!.latitude,
-        lng: _currentPosition!.longitude,
-        iconImage: imageId,
-        iconSize: 1.0,
-      );
-
-      print('âœ… Marqueur livreur mis Ã  jour');
-    } catch (e) {
-      print('âŒ Erreur mise Ã  jour marqueur: $e');
-    }
+  void _updateDriverMarkerOnMap() {
+    setState(() {});
   }
 
   /// Naviguer vers l'Ã©cran de livraison active
@@ -542,7 +503,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
             final timeSinceDismissed = now.difference(dismissedAt);
             // Si moins de 2 minutes, ne pas afficher
             if (timeSinceDismissed.inMinutes < 2) {
-              print('â¸ï¸ Commande #${order.id} masquÃ©e rÃ©cemment, ignorÃ©e');
+              print(
+                'â¸ï¸ Commande #${order.id} masquÃ©e rÃ©cemment, ignorÃ©e',
+              );
               return false;
             } else {
               // Plus de 2 minutes, retirer de la liste des masquÃ©es
@@ -684,7 +647,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
             _navigateToActiveDelivery(updatedOrder);
           }
         } else {
-          print('âŒ Commande acceptÃ©e mais impossible de rÃ©cupÃ©rer les dÃ©tails');
+          print(
+            'âŒ Commande acceptÃ©e mais impossible de rÃ©cupÃ©rer les dÃ©tails',
+          );
         }
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -777,31 +742,41 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  /// Carte Mapbox plein Ã©cran
+  /// Carte OSM plein écran
   Widget _buildMapView() {
-    return MapboxMapWidget(
-      initialPosition: _currentPosition,
+    final center = _currentPosition != null
+        ? LatLng(_currentPosition!.latitude, _currentPosition!.longitude)
+        : LatLng(OsmConfig.defaultLat, OsmConfig.defaultLng);
+    return OsmMapWidget(
+      initialCenter: center,
+      initialZoom: OsmConfig.defaultZoom,
       onMapCreated: _onMapCreated,
-      initialZoom: 15.0,
+      markers: _buildDashboardMarkers(),
     );
   }
 
-  /// Initialisation de la carte
-  Future<void> _onMapCreated(MapboxMap mapboxMap) async {
-    _mapboxMap = mapboxMap;
-    _annotationHelper = MapboxAnnotationHelper(mapboxMap);
-    _cameraHelper = MapboxCameraHelper(mapboxMap);
+  List<Marker> _buildDashboardMarkers() {
+    if (_currentPosition == null) return [];
+    return [
+      Marker(
+        point: LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
+        width: 40,
+        height: 40,
+        child: const Icon(Icons.delivery_dining, color: Colors.blue, size: 40),
+      ),
+    ];
+  }
 
-    // Initialiser les gestionnaires d'annotations
-    await _annotationHelper!.initialize();
+  /// Initialisation de la carte
+  void _onMapCreated(MapController controller) {
+    _mapController = controller;
 
     try {
       // Si on a dÃ©jÃ  une position, ajouter le marqueur et centrer
       if (_currentPosition != null) {
-        await _updateDriverMarkerOnMap();
-        // Centrer la carte sur la position du livreur au chargement
-        await Future.delayed(const Duration(milliseconds: 500));
-        await _centerMapOnDriverPosition();
+        Future.delayed(const Duration(milliseconds: 500), () {
+          if (mounted) _centerMapOnDriverPosition();
+        });
       } else {
         // Attendre un peu et rÃ©essayer si la position n'est pas encore disponible
         Future.delayed(const Duration(seconds: 1), () async {
@@ -811,9 +786,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               setState(() {
                 _currentPosition = position;
               });
-              await _updateDriverMarkerOnMap();
-              await Future.delayed(const Duration(milliseconds: 500));
-              await _centerMapOnDriverPosition();
+              _centerMapOnDriverPosition();
             }
           }
         });
@@ -822,8 +795,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
       print('âŒ Erreur initialisation carte: $e');
     }
   }
-
-
 
   /// Centrer la carte sur la position du livreur
   Future<void> _centerMapOnDriverPosition() async {
@@ -840,7 +811,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       }
     }
 
-    if (_cameraHelper == null || _currentPosition == null) {
+    if (_mapController == null || _currentPosition == null) {
       print('âš ï¸ Carte ou position non disponible');
       return;
     }
@@ -850,7 +821,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
         'ðŸ“ Centrage de la carte sur: ${_currentPosition!.latitude}, ${_currentPosition!.longitude}',
       );
 
-      await _cameraHelper!.animateTo(lat: _currentPosition!.latitude, lng: _currentPosition!.longitude, zoom: 15.0);
+      _mapController!.move(
+        LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
+        15.0,
+      );
 
       print('âœ… Carte centrÃ©e sur la position du livreur');
 
@@ -1021,7 +995,3 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 }
-
-
-
-

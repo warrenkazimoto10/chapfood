@@ -47,13 +47,14 @@ dependencies:
   geolocator: ^14.0.0
   permission_handler: ^11.3.0
   
-  # Navigation and Routing (Google Maps)
+  # Navigation and Routing
   polyline_codec: ^0.1.6
   flutter_polyline_points: ^2.0.0
-  
-  # Mapbox Maps SDK
-  mapbox_maps_flutter: ^2.3.0
-  
+
+  # OpenStreetMap (flutter_map + tuiles Carto)
+  flutter_map: ^6.1.0
+  latlong2: ^0.9.0
+
   # Storage
   shared_preferences: ^2.2.2
   hive: ^2.2.3

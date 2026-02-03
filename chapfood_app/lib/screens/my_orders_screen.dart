@@ -3,11 +3,11 @@ import '../services/order_status_service.dart';
 import '../services/session_service.dart';
 import '../services/delivery_tracking_service.dart';
 import '../utils/text_styles.dart';
+import '../widgets/realtime_map_widget.dart';
 import '../models/order_model.dart';
 import '../models/enums.dart';
 import '../constants/app_colors.dart';
 import 'order_detail_screen.dart';
-import '../widgets/realtime_map_widget.dart';
 
 class MyOrdersScreen extends StatefulWidget {
   const MyOrdersScreen({super.key});
@@ -186,7 +186,6 @@ class _MyOrdersScreenState extends State<MyOrdersScreen> {
                       ),
                       const Icon(Icons.chevron_right),
                       const SizedBox(width: 8),
-                      // Bouton "Suivre la livraison" si en cours de livraison
                       if (_canTrackOrder(order))
                         Container(
                           padding: const EdgeInsets.symmetric(
@@ -238,21 +237,91 @@ class _MyOrdersScreenState extends State<MyOrdersScreen> {
     );
   }
 
-  String _formatDate(DateTime date) {
-    return '${date.day}/${date.month}/${date.year} à ${date.hour}:${date.minute.toString().padLeft(2, '0')}';
-  }
-
-  /// Détermine si une commande peut être suivie en temps réel
-  /// Le bouton "Suivre" s'affiche uniquement si un livreur est assigné
   bool _canTrackOrder(OrderModel order) {
-    // Le suivi est possible pour les commandes en cours de livraison
-    // et seulement pour les commandes de type delivery
-    // ET seulement si un livreur est assigné
     return order.deliveryType == DeliveryType.delivery &&
         (order.status == OrderStatus.readyForDelivery ||
             order.status == OrderStatus.pickedUp ||
             order.status == OrderStatus.inTransit) &&
         (order.hasAssignedDriver == true || order.driverId != null);
+  }
+
+  Future<void> _navigateToRealtimeMap(OrderModel order) async {
+    try {
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => const Center(child: CircularProgressIndicator()),
+      );
+
+      final deliveryData = await DeliveryTrackingService.getDeliveryDetails(
+        order.id,
+      );
+
+      if (context.mounted) {
+        Navigator.of(context).pop();
+      }
+
+      if (deliveryData != null && context.mounted) {
+        final orderData = deliveryData['order'] as OrderModel;
+        final driver = deliveryData['driver'];
+
+        double customerLat = 5.3700;
+        double customerLng = -4.0200;
+        if (orderData.deliveryLat != null &&
+            orderData.deliveryLng != null &&
+            orderData.deliveryLat!.isFinite &&
+            orderData.deliveryLng!.isFinite) {
+          customerLat = orderData.deliveryLat!;
+          customerLng = orderData.deliveryLng!;
+        }
+
+        double driverLat = 5.3563;
+        double driverLng = -4.0363;
+        if (driver?.currentLat != null &&
+            driver?.currentLng != null &&
+            driver!.currentLat!.isFinite &&
+            driver.currentLng!.isFinite) {
+          driverLat = driver.currentLat!;
+          driverLng = driver.currentLng!;
+        }
+
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => RealtimeMapWidget(
+              orderId: order.id.toString(),
+              customerName: order.customerName ?? 'Client',
+              customerLatitude: customerLat,
+              customerLongitude: customerLng,
+              orderStatus: order.status.value,
+              driverName: driver?.name ?? 'Livreur ChapFood',
+              driverPhone: driver?.phone ?? '+225 XX XX XX XX',
+              driverLatitude: driverLat,
+              driverLongitude: driverLng,
+              onClose: () => Navigator.pop(context),
+            ),
+          ),
+        );
+      } else if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Impossible de charger les informations de livraison',
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Erreur: $e'), backgroundColor: Colors.red),
+        );
+      }
+    }
+  }
+
+  String _formatDate(DateTime date) {
+    return '${date.day}/${date.month}/${date.year} à ${date.hour}:${date.minute.toString().padLeft(2, '0')}';
   }
 
   String _getStatusText(OrderStatus status) {
@@ -369,105 +438,5 @@ class _MyOrdersScreenState extends State<MyOrdersScreen> {
         );
       },
     );
-  }
-
-  /// Navigue directement vers la carte de suivi en temps réel
-  void _navigateToRealtimeMap(OrderModel order) async {
-    try {
-      // Afficher un indicateur de chargement
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (context) => const Center(child: CircularProgressIndicator()),
-      );
-
-      // Récupérer les détails de livraison
-      final deliveryData = await DeliveryTrackingService.getDeliveryDetails(
-        order.id,
-      );
-
-      // Fermer l'indicateur de chargement
-      if (context.mounted) {
-        Navigator.of(context).pop();
-      }
-
-      if (deliveryData != null) {
-        final orderData = deliveryData['order'] as OrderModel;
-        final driver = deliveryData['driver'];
-
-        // Extraire les coordonnées du client
-        double customerLat = 5.3700; // Valeur par défaut
-        double customerLng = -4.0200; // Valeur par défaut
-
-        if (orderData.deliveryLat != null &&
-            orderData.deliveryLng != null &&
-            orderData.deliveryLat!.isFinite &&
-            orderData.deliveryLng!.isFinite) {
-          customerLat = orderData.deliveryLat!;
-          customerLng = orderData.deliveryLng!;
-        } else if (orderData.deliveryAddress != null) {
-          final addressMatch = RegExp(
-            r'\(([0-9.-]+),\s*([0-9.-]+)\)',
-          ).firstMatch(orderData.deliveryAddress!);
-          if (addressMatch != null) {
-            customerLat = double.tryParse(addressMatch.group(1)!) ?? 5.3700;
-            customerLng = double.tryParse(addressMatch.group(2)!) ?? -4.0200;
-          }
-        }
-
-        // Coordonnées du livreur
-        double driverLat = 5.3563; // Position par défaut (restaurant)
-        double driverLng = -4.0363;
-
-        if (driver?.currentLat != null &&
-            driver?.currentLng != null &&
-            driver!.currentLat!.isFinite &&
-            driver.currentLng!.isFinite) {
-          driverLat = driver.currentLat!;
-          driverLng = driver.currentLng!;
-        }
-
-        // Naviguer vers RealtimeMapWidget
-        if (context.mounted) {
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (context) => RealtimeMapWidget(
-                orderId: order.id.toString(),
-                customerName: order.customerName ?? 'Client',
-                customerLatitude: customerLat,
-                customerLongitude: customerLng,
-                orderStatus: order.status.value,
-                driverName: driver?.name ?? 'Livreur ChapFood',
-                driverPhone: driver?.phone ?? '+225 XX XX XX XX',
-                driverLatitude: driverLat,
-                driverLongitude: driverLng,
-                onClose: () => Navigator.pop(context),
-              ),
-            ),
-          );
-        }
-      } else {
-        // Erreur lors de la récupération des données
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                'Impossible de charger les informations de livraison',
-              ),
-              backgroundColor: Colors.red,
-            ),
-          );
-        }
-      }
-    } catch (e) {
-      // Fermer l'indicateur de chargement en cas d'erreur
-      if (context.mounted) {
-        Navigator.of(context).pop();
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Erreur: $e'), backgroundColor: Colors.red),
-        );
-      }
-    }
   }
 }

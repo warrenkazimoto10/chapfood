@@ -3,10 +3,8 @@ import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
-import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart';
 
 import 'config/supabase_config.dart';
-import 'config/mapbox_config.dart';
 import 'services/session_service.dart';
 import 'services/theme_service.dart';
 import 'theme/app_theme.dart';
@@ -34,19 +32,6 @@ void main() async {
 
   // Initialiser SessionService
   await SessionService.initialize();
-
-  // Initialiser Mapbox
-  try {
-    final accessToken = MapboxConfig.accessToken;
-    if (accessToken.isNotEmpty) {
-      MapboxOptions.setAccessToken(accessToken);
-      print('✅ Mapbox initialisé avec succès');
-    } else {
-      print('⚠️ MAPBOX_ACCESS_TOKEN non trouvé dans .env');
-    }
-  } catch (e) {
-    print('❌ Erreur lors de l\'initialisation de Mapbox: $e');
-  }
 
   await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
 

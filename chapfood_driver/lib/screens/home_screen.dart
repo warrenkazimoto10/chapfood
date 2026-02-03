@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart';
-import '../widgets/map/mapbox_map_widget.dart';
-import '../widgets/map/mapbox_directional_marker.dart';
-import '../config/mapbox_config.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart';
+import '../widgets/map/osm_map_widget.dart';
+import '../config/osm_config.dart';
 import 'package:geolocator/geolocator.dart' as geo;
 import 'package:provider/provider.dart';
 import 'package:flutter/services.dart';
@@ -15,7 +15,7 @@ import '../services/theme_service.dart';
 import '../services/location_service.dart';
 import '../services/session_service.dart';
 import '../services/order_service.dart';
-import '../services/mapbox_routing_service.dart';
+import '../services/osrm_routing_service.dart';
 import '../services/realtime_debug_service.dart';
 import '../services/delivery_code_service.dart';
 import '../models/order_model.dart';
@@ -39,9 +39,7 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  MapboxMap? _mapController;
-  MapboxAnnotationHelper? _annotationHelper;
-  MapboxCameraHelper? _cameraHelper;
+  MapController? _mapController;
   geo.Position? _currentPosition;
   geo.Position? _previousPosition; // Pour calculer le bearing
   double? _currentBearing; // Direction en degrÃ©s
@@ -51,7 +49,8 @@ class _HomeScreenState extends State<HomeScreen> {
   // // BitmapDescriptor? _clientMarkerIcon;
   bool _isDrivingMode = false; // Mode conduite activÃ©
   Timer? _routeUpdateTimer; // Timer pour mettre Ã  jour l'itinÃ©raire
-  RouteInfo? _currentRoute; // Informations de l'itinÃ©raire actuel
+  OsrmRouteInfo? _currentRoute;
+  List<LatLng> _routePoints = [];
   DriverModel? _currentDriver;
   List<OrderModel> _availableOrders = [];
   OrderModel? _currentOrder;
@@ -59,8 +58,7 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isLoading = true;
   bool _isOnDelivery = false;
   bool _isModalOpen = false; // Nouvelle variable pour contrÃ´ler l'Ã©tat du modal
-  bool _isDeliveryCardVisible =
-      true; // Variable pour contrÃ´ler l'affichage du card de livraison
+  bool _isDeliveryCardVisible =true; // Variable pour contrÃ´ler l'affichage du card de livraison
   StreamSubscription<List<OrderModel>>? _ordersSubscription;
   Timer? _locationTimer;
   Timer? _notificationTimer;
@@ -294,19 +292,12 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  Future<void> _onMapCreated(MapboxMap controller) async {
+  void _onMapCreated(MapController controller) {
     _mapController = controller;
-    _annotationHelper = MapboxAnnotationHelper(controller);
-    _cameraHelper = MapboxCameraHelper(controller);
-    await _annotationHelper!.initialize();
     try {
       _mapController = controller;
 
       // ðŸŽ¯ CHARGER LES IMAGES UNE SEULE FOIS AU DÃ‰MARRAGE
-      await _loadMarkerIcons();
-
-      print('âœ… Images des marqueurs chargÃ©es');
-
       _updateMapLocation();
 
       // ðŸ”„ RESTAURER LE MODE CONDUITE APRÃˆS HOT RESTART
@@ -316,10 +307,7 @@ class _HomeScreenState extends State<HomeScreen> {
           _currentOrder!.deliveryLng != null) {
         print('ðŸ”„ Restauration du mode conduite aprÃ¨s hot restart...');
         Future.delayed(const Duration(milliseconds: 500), () {
-          _addClient// Marker(
-            _currentOrder!.deliveryLat!,
-            _currentOrder!.deliveryLng!,
-          );
+          setState(() {});
           _activateDrivingMode(
             _currentOrder!.deliveryLat!,
             _currentOrder!.deliveryLng!,
@@ -327,9 +315,31 @@ class _HomeScreenState extends State<HomeScreen> {
           print('âœ… Mode conduite restaurÃ© aprÃ¨s hot restart');
         });
       }
-    } catch (e) {
-      print('Erreur crÃ©ation carte: $e');
+  }
+
+  List<Marker> _buildHomeMarkers() {
+    final markers = <Marker>[];
+    if (_currentPosition != null) {
+      markers.add(
+        Marker(
+          point: LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
+          width: 40,
+          height: 40,
+          child: const Icon(Icons.delivery_dining, color: Colors.blue, size: 40),
+        ),
+      );
     }
+    if (_currentOrder?.deliveryLat != null && _currentOrder?.deliveryLng != null) {
+      markers.add(
+        Marker(
+          point: LatLng(_currentOrder!.deliveryLat!, _currentOrder!.deliveryLng!),
+          width: 32,
+          height: 32,
+          child: const Icon(Icons.person_pin_circle, color: Colors.red, size: 32),
+        ),
+      );
+    }
+    return markers;
   }
 
   Future<void> _loadMarkerIcons() async {
@@ -675,23 +685,21 @@ class _HomeScreenState extends State<HomeScreen> {
       print('ðŸ“ Position client: $clientLat, $clientLng');
 
       // Utiliser le service de routage Mapbox
-      final route = await MapboxRoutingService.getRoute(
-        startLat: _currentPosition!.latitude,
-        startLng: _currentPosition!.longitude,
-        endLat: clientLat,
-        endLng: clientLng,
+      final route = await OsrmRoutingService.getRouteWithInfo(
+        originLat: _currentPosition!.latitude,
+        originLng: _currentPosition!.longitude,
+        destLat: clientLat,
+        destLng: clientLng,
       );
 
       if (route != null) {
         setState(() {
           _currentRoute = route;
+          _routePoints = route.coordinates;
         });
 
-        // Afficher l'itinÃ©raire sur la carte
-        await _drawRoute(route.coordinates);
-
-        // Centrer la carte sur l'itinÃ©raire complet
-        await _centerMapOnRoute(route.coordinates);
+        _drawRoute(route.coordinates);
+        _centerMapOnRoute(route.coordinates);
 
         print(
           'âœ… ItinÃ©raire affichÃ©: ${route.formattedDistance} â€¢ ${route.formattedDuration}',
@@ -1053,10 +1061,14 @@ class _HomeScreenState extends State<HomeScreen> {
       body: Stack(
         children: [
           // CARTE PLEIN Ã‰CRAN
-          MapboxMapWidget(
-            initialPosition: _currentPosition,
+          OsmMapWidget(
+            initialCenter: _currentPosition != null
+                ? LatLng(_currentPosition!.latitude, _currentPosition!.longitude)
+                : LatLng(OsmConfig.defaultLat, OsmConfig.defaultLng),
+            initialZoom: OsmConfig.defaultZoom,
             onMapCreated: _onMapCreated,
-            initialZoom: 15.0,
+            markers: _buildHomeMarkers(),
+            polylines: _routePoints.isEmpty ? null : [Polyline(points: _routePoints, color: Colors.blue, strokeWidth: 5)],
           ),
 
           // OVERLAY MODE INDISPONIBLE

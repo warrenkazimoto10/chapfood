@@ -5,20 +5,14 @@ class OrderCard extends StatelessWidget {
   final OrderModel order;
   final VoidCallback? onTap;
 
-  const OrderCard({
-    super.key,
-    required this.order,
-    this.onTap,
-  });
+  const OrderCard({super.key, required this.order, this.onTap});
 
   @override
   Widget build(BuildContext context) {
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
       color: Colors.white.withOpacity(0.95),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-      ),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(12),
@@ -73,17 +67,13 @@ class OrderCard extends StatelessWidget {
                   ),
                 ],
               ),
-              
+
               const SizedBox(height: 12),
-              
+
               // Informations client
               Row(
                 children: [
-                  Icon(
-                    Icons.person,
-                    size: 16,
-                    color: Colors.grey[600],
-                  ),
+                  Icon(Icons.person, size: 16, color: Colors.grey[600]),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
@@ -94,41 +84,27 @@ class OrderCard extends StatelessWidget {
                       ),
                     ),
                   ),
-                  Icon(
-                    Icons.phone,
-                    size: 16,
-                    color: Colors.grey[600],
-                  ),
+                  Icon(Icons.phone, size: 16, color: Colors.grey[600]),
                   const SizedBox(width: 4),
                   Text(
                     order.customerPhone,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Colors.grey[600],
-                    ),
+                    style: TextStyle(fontSize: 12, color: Colors.grey[600]),
                   ),
                 ],
               ),
-              
+
               const SizedBox(height: 8),
-              
+
               // Adresse de livraison
               if (order.deliveryAddress != null) ...[
                 Row(
                   children: [
-                    Icon(
-                      Icons.location_on,
-                      size: 16,
-                      color: Colors.grey[600],
-                    ),
+                    Icon(Icons.location_on, size: 16, color: Colors.grey[600]),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
                         order.deliveryAddress!,
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Colors.grey[600],
-                        ),
+                        style: TextStyle(fontSize: 12, color: Colors.grey[600]),
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                       ),
@@ -137,7 +113,7 @@ class OrderCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 8),
               ],
-              
+
               // Informations de paiement et montant
               Row(
                 children: [
@@ -149,10 +125,7 @@ class OrderCard extends StatelessWidget {
                   const SizedBox(width: 8),
                   Text(
                     order.paymentMethod.displayName,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Colors.grey[600],
-                    ),
+                    style: TextStyle(fontSize: 12, color: Colors.grey[600]),
                   ),
                   const Spacer(),
                   Text(
@@ -165,9 +138,10 @@ class OrderCard extends StatelessWidget {
                   ),
                 ],
               ),
-              
+
               // Instructions spéciales
-              if (order.instructions != null && order.instructions!.isNotEmpty) ...[
+              if (order.instructions != null &&
+                  order.instructions!.isNotEmpty) ...[
                 const SizedBox(height: 8),
                 Container(
                   padding: const EdgeInsets.all(8),
@@ -201,9 +175,9 @@ class OrderCard extends StatelessWidget {
                   ),
                 ),
               ],
-              
+
               const SizedBox(height: 12),
-              
+
               // Boutons d'action
               Row(
                 children: [
@@ -229,10 +203,7 @@ class OrderCard extends StatelessWidget {
                       onPressed: () {
                         // TODO: Marquer comme récupérée/livrée selon le statut
                       },
-                      icon: Icon(
-                        _getActionIcon(order.status),
-                        size: 16,
-                      ),
+                      icon: Icon(_getActionIcon(order.status), size: 16),
                       label: Text(_getActionText(order.status)),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: const Color(0xFFE94560),
@@ -260,6 +231,8 @@ class OrderCard extends StatelessWidget {
         return Colors.blue;
       case OrderStatus.readyForDelivery:
         return Colors.green;
+      case OrderStatus.pickedUp:
+        return Colors.teal;
       case OrderStatus.inTransit:
         return Colors.purple;
       case OrderStatus.delivered:

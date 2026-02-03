@@ -1,7 +1,6 @@
-﻿import 'dart:math' as math;
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
-import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 /// CrÃ©e un marqueur directionnel avec halo et popup
 class DirectionalMarker {
@@ -208,4 +207,3 @@ class DirectionalMarker {
     // return BitmapDescriptor.fromBytes(byteData!.buffer.asUint8List());
   }
 }
-

@@ -6,7 +6,7 @@ Application mobile pour les livreurs de ChapFood, permettant la gestion des livr
 
 - **Écran de démarrage** avec le design ChapFood
 - **Authentification** des livreurs
-- **Carte Mapbox** en plein écran pour le suivi GPS
+- **Carte OpenStreetMap** (flutter_map) pour le suivi GPS et les itinéraires (OSRM)
 - **Gestion des commandes** assignées
 - **Notifications** en temps réel
 - **Suivi de position** automatique
@@ -17,7 +17,7 @@ Application mobile pour les livreurs de ChapFood, permettant la gestion des livr
 L'application comprend :
 - Splash screen avec le logo ChapFood et le design gradient
 - Page de connexion pour les livreurs
-- Page d'accueil avec carte Mapbox et gestion des commandes
+- Page d'accueil (dashboard) avec carte OSM et gestion des commandes
 
 ## 🛠️ Installation
 
@@ -27,7 +27,6 @@ L'application comprend :
 - Dart SDK
 - Android Studio / VS Code
 - Compte Supabase
-- Compte Mapbox
 
 ### Configuration
 
@@ -42,24 +41,12 @@ cd chapfood_driver
 flutter pub get
 ```
 
-3. **Configurer Supabase**
-   - Créer un projet Supabase
-   - Récupérer l'URL et la clé anonyme
-   - Mettre à jour `lib/main.dart` :
-   ```dart
-   const String supabaseUrl = 'VOTRE_URL_SUPABASE';
-   const String supabaseAnonKey = 'VOTRE_CLE_SUPABASE';
-   ```
+3. **Configurer les variables d'environnement**
+   - Copier `env.example` vers `.env`
+   - Renseigner `SUPABASE_URL` et `SUPABASE_ANON_KEY` (projet Supabase)
+   - Aucun token Mapbox/Google requis : cartes et routage via OpenStreetMap (OSM, OSRM)
 
-4. **Configurer Mapbox**
-   - Créer un compte Mapbox
-   - Générer un token d'accès
-   - Mettre à jour `lib/main.dart` :
-   ```dart
-   const String mapboxAccessToken = 'VOTRE_TOKEN_MAPBOX';
-   ```
-
-5. **Configurer les permissions Android**
+4. **Configurer les permissions Android**
    - Ajouter dans `android/app/src/main/AndroidManifest.xml` :
    ```xml
    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
@@ -67,7 +54,7 @@ flutter pub get
    <uses-permission android:name="android.permission.INTERNET" />
    ```
 
-6. **Configurer les permissions iOS**
+5. **Configurer les permissions iOS**
    - Ajouter dans `ios/Runner/Info.plist` :
    ```xml
    <key>NSLocationWhenInUseUsageDescription</key>
@@ -108,6 +95,7 @@ L'application utilise Supabase avec les tables suivantes :
 - **LocationService** : Gestion de la localisation GPS
 - **SessionService** : Gestion de la session utilisateur
 - **DeliveryTrackingService** : Suivi des livraisons
+- **OsrmRoutingService** : Calcul d’itinéraires (OpenStreetMap)
 
 ## 🎨 Design
 
@@ -120,7 +108,7 @@ L'application suit le design ChapFood avec :
 
 1. **SplashScreen** : Écran de démarrage avec animation
 2. **LoginScreen** : Connexion des livreurs
-3. **HomeScreen** : Carte Mapbox et gestion des commandes
+3. **DashboardScreen** : Carte OSM, position du livreur et gestion des commandes
 
 ## 🔐 Authentification
 
@@ -131,10 +119,10 @@ L'authentification se fait via :
 
 ## 🗺️ Cartes
 
-Utilisation de Mapbox pour :
+Utilisation d’**OpenStreetMap** (flutter_map) et **OSRM** pour :
 - Affichage de la position du livreur
 - Suivi GPS en temps réel
-- Navigation vers les adresses de livraison
+- Itinéraires et navigation vers restaurant / client
 
 ## 📊 Fonctionnalités principales
 
@@ -156,9 +144,8 @@ Utilisation de Mapbox pour :
    - Vérifier l'URL et la clé
    - Vérifier la connexion internet
 
-3. **Erreur Mapbox**
-   - Vérifier le token d'accès
-   - Vérifier la configuration des permissions
+3. **Carte / itinéraire**
+   - Les tuiles et le routage utilisent des APIs publiques OSM/OSRM ; vérifier la connexion internet
 
 ## 📝 Notes de développement
 

@@ -3,17 +3,17 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
-import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart';
-import '../widgets/map/mapbox_map_widget.dart';
-import '../widgets/map/mapbox_directional_marker.dart';
-import '../config/mapbox_config.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart';
+import '../widgets/map/osm_map_widget.dart';
+import '../config/osm_config.dart';
 import 'package:geolocator/geolocator.dart' as geo;
 import 'package:url_launcher/url_launcher.dart';
 import '../services/active_delivery_service.dart';
 import '../services/session_service.dart';
 import '../services/state_persistence_service.dart';
 import '../services/driver_location_service.dart';
-import '../services/mapbox_routing_service.dart' as routing;
+import '../services/osrm_routing_service.dart';
 import '../services/smooth_movement_service.dart';
 import '../models/order_model.dart';
 import '../models/active_delivery_state.dart';
@@ -22,7 +22,6 @@ import '../widgets/delivery/delivery_status_card.dart';
 import '../widgets/delivery/delivery_actions_panel.dart';
 import '../widgets/delivery/delivery_completion_modal.dart';
 import '../widgets/delivery/route_progress_card.dart';
-import '../widgets/map/directional_marker.dart';
 
 /// Ã‰cran dÃ©diÃ© Ã  la livraison active avec carte et suivi en temps rÃ©el
 class ActiveDeliveryScreen extends StatefulWidget {
@@ -43,13 +42,11 @@ class _ActiveDeliveryScreenState extends State<ActiveDeliveryScreen> {
   StreamSubscription<geo.Position>? _positionSubscription;
   DriverModel? _currentDriver;
 
-  // Ã‰tat pour la carte
-  MapboxMap? _mapController;
-  MapboxAnnotationHelper? _annotationHelper;
-  MapboxCameraHelper? _cameraHelper;
+  // État pour la carte OSM
+  MapController? _mapController;
   geo.Position? _currentPosition;
-  // Les marqueurs et polylines sont maintenant gérés via MapboxAnnotationHelper
-  routing.RouteInfo? _currentRoute;
+  List<LatLng> _routePoints = [];
+  OsrmRouteInfo? _currentRoute;
   Timer? _routeUpdateTimer;
 
   // CoordonnÃ©es du restaurant (en dur)
@@ -59,11 +56,9 @@ class _ActiveDeliveryScreenState extends State<ActiveDeliveryScreen> {
   // Service pour lisser le mouvement du livreur (marker fluide)
   final SmoothMovementService _smoothMovementService = SmoothMovementService();
 
-  // Ã‰tat pour le mode 3D
-  bool _is3DMode = true; // ActivÃ© par dÃ©faut
-  geo.Position?
-  _previousPosition; // Position prÃ©cÃ©dente pour calculer le bearing
-  double? _currentBearing; // Bearing actuel calculÃ©
+  geo.Position? _previousPosition;
+  double? _currentBearing;
+  bool _is3DMode = false;
 
   @override
   void initState() {
@@ -74,8 +69,6 @@ class _ActiveDeliveryScreenState extends State<ActiveDeliveryScreen> {
 
   Future<void> _initializeDelivery() async {
     try {
-      // Activer automatiquement le mode 3D
-      _is3DMode = true;
       _previousPosition = null;
       _currentBearing = null;
 
@@ -120,16 +113,13 @@ class _ActiveDeliveryScreenState extends State<ActiveDeliveryScreen> {
 
       // S'assurer que la carte est initialisÃ©e avant d'afficher les marqueurs
       // Si la carte n'est pas encore crÃ©Ã©e, attendre un peu
-      if (_mapController == null) {
-        await Future.delayed(const Duration(milliseconds: 1000));
-      }
 
-      // RÃ©initialiser les marqueurs et itinÃ©raires selon l'Ã©tape actuelle
-      if (_mapController != null) {
+      // Marqueurs/itinéraire initialisés dans _onMapCreated (carte OSM)
+      if (false) {
         if (!_hasPickedUp) {
           // Ã‰tape 1 : Aller au restaurant
           print('ðŸ”„ RÃ©initialisation : Ã‰tape 1 - Restaurant');
-          await _addRestaurantMarker(restaurantLat, restaurantLng);
+          _addRestaurantMarker(restaurantLat, restaurantLng);
           if (_currentPosition != null) {
             await _calculateAndDisplayRouteToRestaurant();
           }
@@ -138,7 +128,7 @@ class _ActiveDeliveryScreenState extends State<ActiveDeliveryScreen> {
           print('ðŸ”„ RÃ©initialisation : Ã‰tape 2 - Client');
           if (_currentOrder?.deliveryLat != null &&
               _currentOrder?.deliveryLng != null) {
-            await _addClientMarker(
+            _addClientMarker(
               _currentOrder!.deliveryLat!,
               _currentOrder!.deliveryLng!,
             );
@@ -170,7 +160,7 @@ class _ActiveDeliveryScreenState extends State<ActiveDeliveryScreen> {
           });
 
           // Mettre Ã  jour le marker du livreur (sans saut)
-          await _updateDriverMarker();
+          _updateDriverMarker();
 
           // Mettre Ã  jour l'itinÃ©raire si nÃ©cessaire selon l'Ã©tape
           if (!_hasPickedUp) {
@@ -243,26 +233,15 @@ class _ActiveDeliveryScreenState extends State<ActiveDeliveryScreen> {
         print('ðŸ“‹ _hasPickedUp mis Ã  jour Ã  : $shouldBePickedUp');
 
         // Si on passe de "pas rÃ©cupÃ©rÃ©" Ã  "rÃ©cupÃ©rÃ©" (mÃªme si changÃ© par l'admin)
-        if (!wasPickedUp && _hasPickedUp && _mapController != null) {
-          // Supprimer le marqueur du restaurant via MapboxAnnotationHelper
-          if (_annotationHelper != null) {
-            await _annotationHelper!.removePointAnnotation('restaurant');
-          }
-
-          // Supprimer le tracÃ© vers le restaurant
-          // Supprimer le tracé vers le restaurant via MapboxAnnotationHelper
-          if (_annotationHelper != null) {
-            await _annotationHelper!.removePolyline('route-to-restaurant');
-          }
-
-          // Ajouter le marqueur du client et calculer l'itinÃ©raire vers le client
+        if (!wasPickedUp && _hasPickedUp) {
+          setState(() => _routePoints = []);
           if (_currentOrder!.deliveryLat != null &&
               _currentOrder!.deliveryLng != null) {
-            await _addClientMarker(
+            _addClientMarker(
               _currentOrder!.deliveryLat!,
               _currentOrder!.deliveryLng!,
             );
-            await _calculateAndDisplayRouteToClient();
+            _calculateAndDisplayRouteToClient();
           }
         }
       }
@@ -271,23 +250,9 @@ class _ActiveDeliveryScreenState extends State<ActiveDeliveryScreen> {
     }
   }
 
-  /// Initialisation de la carte Google Maps
-  Future<void> _onMapCreated(MapboxMap controller) async {
+  /// Carte OSM créée : enregistrer le controller et initialiser marqueurs/itinéraire
+  void _onMapCreated(MapController controller) {
     _mapController = controller;
-    _annotationHelper = MapboxAnnotationHelper(controller);
-    _cameraHelper = MapboxCameraHelper(controller);
-    await _annotationHelper!.initialize();
-    _mapController = controller;
-
-    // Plus besoin de charger les images de marqueurs, MapboxAnnotationHelper gère les annotations
-
-    // Initialiser les marqueurs et l'itinÃ©raire
-    if (_currentPosition != null) {
-      await _updateDriverMarker();
-    }
-
-    // Attendre un peu pour s'assurer que _loadAssignmentInfo() a terminÃ©
-    await Future.delayed(const Duration(milliseconds: 500));
 
     // DÃ©terminer l'Ã©tape actuelle
     print('ðŸ” Ã‰tat actuel : _hasPickedUp = $_hasPickedUp');
@@ -307,36 +272,30 @@ class _ActiveDeliveryScreenState extends State<ActiveDeliveryScreen> {
 
     if (!_hasPickedUp && !isPickedUpInDB) {
       // Ã‰tape 1 : Aller au restaurant
-      print('ðŸ“ Ã‰tape 1 : Affichage du restaurant et tracÃ© vers le restaurant');
-      // S'assurer qu'on supprime d'abord tout tracÃ© vers le client s'il existe
-      // _polylines.removeWhere(
-        (p) => p.polylineId == const PolylineId('route-to-client'),
+      print(
+        'ðŸ“ Ã‰tape 1 : Affichage du restaurant et tracÃ© vers le restaurant',
       );
-      // _markers.removeWhere((m) => m.markerId == const MarkerId('client'));
+      // S'assurer qu'on supprime d'abord tout tracÃ© vers le client s'il existe
       print('ðŸ—‘ï¸ TracÃ© et marqueur client supprimÃ©s (Ã©tape 1)');
 
-      await _addRestaurantMarker(restaurantLat, restaurantLng);
+      _addRestaurantMarker(restaurantLat, restaurantLng);
       if (_currentPosition != null) {
-        await _calculateAndDisplayRouteToRestaurant();
+        _calculateAndDisplayRouteToRestaurant();
       }
     } else {
       // Ã‰tape 2 : Aller au client
       print('ðŸ“ Ã‰tape 2 : Affichage du client et tracÃ© vers le client');
       // S'assurer qu'on supprime le marqueur et tracé du restaurant
-      if (_annotationHelper != null) {
-        await _annotationHelper!.removePointAnnotation('restaurant');
-        await _annotationHelper!.removePolyline('route-to-restaurant');
-      }
       print('ðŸ—‘ï¸ Marqueur et tracÃ© restaurant supprimÃ©s (Ã©tape 2)');
 
       if (_currentOrder?.deliveryLat != null &&
           _currentOrder?.deliveryLng != null) {
-        await _addClientMarker(
+        _addClientMarker(
           _currentOrder!.deliveryLat!,
           _currentOrder!.deliveryLng!,
         );
         if (_currentPosition != null) {
-          await _calculateAndDisplayRouteToClient();
+          _calculateAndDisplayRouteToClient();
         }
       }
     }
@@ -382,7 +341,9 @@ class _ActiveDeliveryScreenState extends State<ActiveDeliveryScreen> {
             _previousPosition!,
             _currentPosition!,
           );
-          print('ðŸ§­ Bearing calculÃ©: ${_currentBearing!.toStringAsFixed(1)}Â°');
+          print(
+            'ðŸ§­ Bearing calculÃ©: ${_currentBearing!.toStringAsFixed(1)}Â°',
+          );
         }
       }
 
@@ -406,35 +367,11 @@ class _ActiveDeliveryScreenState extends State<ActiveDeliveryScreen> {
         // Sinon, utiliser le bearing prÃ©cÃ©dent pour Ã©viter les mouvements erratiques
       }
 
-      // Supprimer l'ancien marqueur via MapboxAnnotationHelper
-      if (_annotationHelper != null) {
-        await _annotationHelper!.removePointAnnotation('driver');
-      }
-
-      // Ajouter/mettre à jour le marqueur via MapboxAnnotationHelper
-      if (_annotationHelper != null) {
-        await _annotationHelper!.addOrUpdatePointAnnotation(
-          id: 'driver',
-          lat: _currentPosition!.latitude,
-          lng: _currentPosition!.longitude,
-          iconColor: MapboxConfig.driverMarkerColor,
-        );
-      }
-
-      // Centrer la carte sur la position du livreur avec mode 3D
-      if (_cameraHelper != null) {
-        await _cameraHelper!.animateTo(
-          lat: _currentPosition!.latitude,
-          lng: _currentPosition!.longitude,
-          zoom: _is3DMode ? 18.0 : 15.0,
-          pitch: _is3DMode ? 60.0 : 0.0,
-          bearing: (_is3DMode && _currentBearing != null)
-              ? _currentBearing!
-              : 0.0,
-        );
-      }
-
-      // Stocker la position actuelle comme position prÃ©cÃ©dente
+      setState(() {});
+      _mapController!.move(
+        LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
+        16,
+      );
       _previousPosition = _currentPosition;
     } catch (e) {
       print('âŒ Erreur lors de la mise Ã  jour du marqueur livreur: $e');
@@ -448,17 +385,7 @@ class _ActiveDeliveryScreenState extends State<ActiveDeliveryScreen> {
     try {
       print('ðŸ“ Ajout du marqueur restaurant Ã : lat=$lat, lng=$lng');
 
-      // Ajouter/mettre à jour le marqueur via MapboxAnnotationHelper
-      if (_annotationHelper != null) {
-        await _annotationHelper!.addOrUpdatePointAnnotation(
-          id: 'restaurant',
-          lat: lat,
-          lng: lng,
-          iconColor: MapboxConfig.restaurantMarkerColor,
-        );
-      }
-
-      print('✅ Marqueur restaurant ajouté à Position($lat, $lng)');
+      setState(() {});
     } catch (e) {
       print('âŒ Erreur lors de l\'ajout du marqueur restaurant: $e');
     }
@@ -481,17 +408,7 @@ class _ActiveDeliveryScreenState extends State<ActiveDeliveryScreen> {
         );
       }
 
-      // Ajouter/mettre à jour le marqueur via MapboxAnnotationHelper
-      if (_annotationHelper != null) {
-        await _annotationHelper!.addOrUpdatePointAnnotation(
-          id: 'client',
-          lat: lat,
-          lng: lng,
-          iconColor: MapboxConfig.clientMarkerColor,
-        );
-      }
-
-      print('✅ Marqueur client ajouté à Position($lat, $lng)');
+      setState(() {});
     } catch (e) {
       print('âŒ Erreur lors de l\'ajout du marqueur client: $e');
     }
@@ -513,11 +430,11 @@ class _ActiveDeliveryScreenState extends State<ActiveDeliveryScreen> {
       );
       print('ðŸ“ Position restaurant: $restaurantLat, $restaurantLng');
 
-      final route = await MapboxRoutingService.getRoute(
-        startLat: _currentPosition!.latitude,
-        startLng: _currentPosition!.longitude,
-        endLat: restaurantLat,
-        endLng: restaurantLng,
+      final route = await OsrmRoutingService.getRouteWithInfo(
+        originLat: _currentPosition!.latitude,
+        originLng: _currentPosition!.longitude,
+        destLat: restaurantLat,
+        destLng: restaurantLng,
       );
 
       if (route != null) {
@@ -532,8 +449,8 @@ class _ActiveDeliveryScreenState extends State<ActiveDeliveryScreen> {
           );
         }
 
-        await _drawRouteToRestaurant(route.coordinates);
-        await _centerMapOnRoute(route.coordinates);
+        _drawRouteToRestaurant(route.coordinates);
+        _centerMapOnRoute(route.coordinates);
 
         print(
           'âœ… ItinÃ©raire vers restaurant affichÃ©: ${route.formattedDistance} â€¢ ${route.formattedDuration}',
@@ -589,11 +506,11 @@ class _ActiveDeliveryScreenState extends State<ActiveDeliveryScreen> {
         print('   Les coordonnÃ©es semblent incorrectes ou inversÃ©es');
       }
 
-      final route = await MapboxRoutingService.getRoute(
-        startLat: _currentPosition!.latitude,
-        startLng: _currentPosition!.longitude,
-        endLat: _currentOrder!.deliveryLat!,
-        endLng: _currentOrder!.deliveryLng!,
+      final route = await OsrmRoutingService.getRouteWithInfo(
+        originLat: _currentPosition!.latitude,
+        originLng: _currentPosition!.longitude,
+        destLat: _currentOrder!.deliveryLat!,
+        destLng: _currentOrder!.deliveryLng!,
       );
 
       if (route != null) {
@@ -608,8 +525,8 @@ class _ActiveDeliveryScreenState extends State<ActiveDeliveryScreen> {
           );
         }
 
-        await _drawRouteToClient(route.coordinates);
-        await _centerMapOnRoute(route.coordinates);
+        _drawRouteToClient(route.coordinates);
+        _centerMapOnRoute(route.coordinates);
 
         print(
           'âœ… ItinÃ©raire vers client affichÃ©: ${route.formattedDistance} â€¢ ${route.formattedDuration}',
@@ -665,44 +582,14 @@ class _ActiveDeliveryScreenState extends State<ActiveDeliveryScreen> {
     });
   }
 
-  /// Dessiner l'itinÃ©raire vers le restaurant sur la carte
-  Future<void> _drawRouteToRestaurant(List<routing.Position> coordinates) async {
-    if (_mapController == null || _annotationHelper == null) return;
-
-    try {
-      // Dessiner la route via MapboxAnnotationHelper
-      await _annotationHelper!.addOrUpdatePolyline(
-        id: 'route-to-restaurant',
-        coordinates: coordinates,
-        lineColor: 0xFFFF6B35, // Orange
-        lineWidth: 5.0,
-      );
-      
-      // Supprimer l'ancienne route vers le client si elle existe
-      await _annotationHelper!.removePolyline('route-to-client');
-    } catch (e) {
-      print('âŒ Erreur lors du dessin de l\'itinÃ©raire vers le restaurant: $e');
-    }
+  /// Dessiner l'itinéraire vers le restaurant sur la carte OSM
+  void _drawRouteToRestaurant(List<LatLng> coordinates) {
+    setState(() => _routePoints = coordinates);
   }
 
-  /// Dessiner l'itinéraire vers le client sur la carte
-  Future<void> _drawRouteToClient(List<routing.Position> coordinates) async {
-    if (_mapController == null || _annotationHelper == null) return;
-
-    try {
-      // Dessiner la route via MapboxAnnotationHelper
-      await _annotationHelper!.addOrUpdatePolyline(
-        id: 'route-to-client',
-        coordinates: coordinates,
-        lineColor: 0xFF4CAF50, // Vert pour différencier du restaurant
-        lineWidth: 5.0,
-      );
-      
-      // Supprimer l'ancienne route vers le restaurant si elle existe
-      await _annotationHelper!.removePolyline('route-to-restaurant');
-    } catch (e) {
-      print('âŒ Erreur lors du dessin de l\'itinÃ©raire vers le client: $e');
-    }
+  /// Dessiner l'itinéraire vers le client sur la carte OSM
+  void _drawRouteToClient(List<LatLng> coordinates) {
+    setState(() => _routePoints = coordinates);
   }
 
   /// Itinéraire de secours vers le restaurant (ligne droite)
@@ -710,11 +597,11 @@ class _ActiveDeliveryScreenState extends State<ActiveDeliveryScreen> {
     if (_currentPosition == null) return;
 
     final fallbackRoute = [
-      Position(_currentPosition!.longitude, _currentPosition!.latitude),
-      Position(restaurantLng, restaurantLat),
+      LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
+      LatLng(restaurantLat, restaurantLng),
     ];
 
-    await _drawRouteToRestaurant(fallbackRoute);
+    _drawRouteToRestaurant(fallbackRoute);
     print(
       'âš ï¸ Utilisation de l\'itinÃ©raire de secours vers le restaurant (ligne droite)',
     );
@@ -728,31 +615,24 @@ class _ActiveDeliveryScreenState extends State<ActiveDeliveryScreen> {
       return;
 
     final fallbackRoute = [
-      Position(_currentPosition!.longitude, _currentPosition!.latitude),
-      Position(_currentOrder!.deliveryLng!, _currentOrder!.deliveryLat!),
+      LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
+      LatLng(_currentOrder!.deliveryLat!, _currentOrder!.deliveryLng!),
     ];
 
-    await _drawRouteToClient(fallbackRoute);
+    _drawRouteToClient(fallbackRoute);
     print(
       'âš ï¸ Utilisation de l\'itinÃ©raire de secours vers le client (ligne droite)',
     );
   }
 
-  /// Centrer la carte sur l'itinÃ©raire
-  Future<void> _centerMapOnRoute(List<routing.Position> coordinates) async {
-    if (_mapController == null || _cameraHelper == null || coordinates.isEmpty) return;
-
+  /// Centrer la carte sur l'itinéraire (OSM)
+  void _centerMapOnRoute(List<LatLng> coordinates) {
+    if (_mapController == null || coordinates.isEmpty) return;
     try {
-      // Utiliser MapboxCameraHelper pour centrer la carte sur la route
-      await _cameraHelper!.fitBounds(
-        coordinates: coordinates,
-        padding: const EdgeInsets.all(50),
-        durationMs: 1000,
-      );
-      
-      print('✅ Carte centrée sur la route avec ${coordinates.length} points');
+      final bounds = LatLngBounds.fromPoints(coordinates);
+      _mapController!.fitCamera(CameraFit.bounds(bounds: bounds));
     } catch (e) {
-      print('âŒ Erreur lors du centrage sur l\'itinÃ©raire: $e');
+      print('Erreur centrage itinéraire: $e');
     }
   }
 
@@ -770,24 +650,14 @@ class _ActiveDeliveryScreenState extends State<ActiveDeliveryScreen> {
           _hasPickedUp = true;
         });
 
-        // Supprimer le marqueur du restaurant via MapboxAnnotationHelper
-        if (_annotationHelper != null) {
-          await _annotationHelper!.removePointAnnotation('restaurant');
-        }
-
-        // Supprimer le tracé vers le restaurant via MapboxAnnotationHelper
-        if (_annotationHelper != null) {
-          await _annotationHelper!.removePolyline('route-to-restaurant');
-        }
-
-        // Ajouter le marqueur du client et calculer l'itinÃ©raire vers le client
+        setState(() => _routePoints = []);
         if (_currentOrder!.deliveryLat != null &&
             _currentOrder!.deliveryLng != null) {
-          await _addClientMarker(
+          _addClientMarker(
             _currentOrder!.deliveryLat!,
             _currentOrder!.deliveryLng!,
           );
-          await _calculateAndDisplayRouteToClient();
+          _calculateAndDisplayRouteToClient();
         }
 
         final state = ActiveDeliveryState.fromOrder(
@@ -984,16 +854,10 @@ class _ActiveDeliveryScreenState extends State<ActiveDeliveryScreen> {
 
     print('ðŸ”„ Mode 3D ${_is3DMode ? "activÃ©" : "dÃ©sactivÃ©"}');
 
-    // Réappliquer les paramètres de caméra immédiatement
-    if (_mapController != null && _cameraHelper != null && _currentPosition != null) {
-      await _cameraHelper!.animateTo(
-        lat: _currentPosition!.latitude,
-        lng: _currentPosition!.longitude,
-        zoom: _is3DMode ? 18.0 : 15.0, // Zoom plus élevé en mode 3D
-        pitch: _is3DMode ? 60.0 : 0.0,
-        bearing: (_is3DMode && _currentBearing != null)
-            ? _currentBearing!
-            : 0.0,
+    if (_mapController != null && _currentPosition != null) {
+      _mapController!.move(
+        LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
+        _is3DMode ? 18.0 : 15.0,
       );
     }
   }
@@ -1042,6 +906,69 @@ class _ActiveDeliveryScreenState extends State<ActiveDeliveryScreen> {
     }
   }
 
+  LatLng _mapCenter() {
+    final driverLat = _currentPosition?.latitude ?? OsmConfig.defaultLat;
+    final driverLng = _currentPosition?.longitude ?? OsmConfig.defaultLng;
+    final destLat = _hasPickedUp && _currentOrder?.deliveryLat != null
+        ? _currentOrder!.deliveryLat!
+        : restaurantLat;
+    final destLng = _hasPickedUp && _currentOrder?.deliveryLng != null
+        ? _currentOrder!.deliveryLng!
+        : restaurantLng;
+    return LatLng((driverLat + destLat) / 2, (driverLng + destLng) / 2);
+  }
+
+  List<Marker> _buildMarkers() {
+    final markers = <Marker>[];
+    if (_currentPosition != null) {
+      markers.add(
+        Marker(
+          point: LatLng(
+            _currentPosition!.latitude,
+            _currentPosition!.longitude,
+          ),
+          width: 40,
+          height: 40,
+          child: const Icon(
+            Icons.delivery_dining,
+            color: Colors.blue,
+            size: 40,
+          ),
+        ),
+      );
+    }
+    if (!_hasPickedUp) {
+      markers.add(
+        Marker(
+          point: LatLng(restaurantLat, restaurantLng),
+          width: 32,
+          height: 32,
+          child: const Icon(Icons.restaurant, color: Colors.orange, size: 32),
+        ),
+      );
+    }
+    if (_hasPickedUp &&
+        _currentOrder?.deliveryLat != null &&
+        _currentOrder?.deliveryLng != null) {
+      markers.add(
+        Marker(
+          point: LatLng(
+            _currentOrder!.deliveryLat!,
+            _currentOrder!.deliveryLng!,
+          ),
+          width: 32,
+          height: 32,
+          child: const Icon(
+            Icons.person_pin_circle,
+            color: Colors.red,
+            size: 32,
+          ),
+        ),
+      );
+    }
+    return markers;
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_isLoading) {
@@ -1058,56 +985,20 @@ class _ActiveDeliveryScreenState extends State<ActiveDeliveryScreen> {
     return Scaffold(
       body: Stack(
         children: [
-          // Carte pleine écran
-          MapboxMapWidget(
-            key: const ValueKey('map'),
-            initialPosition: _currentPosition ??
-                (_currentOrder!.deliveryLat != null &&
-                        _currentOrder!.deliveryLng != null
-                    ? geo.Position(
-                        latitude: _currentOrder!.deliveryLat!,
-                        longitude: _currentOrder!.deliveryLng!,
-                        timestamp: DateTime.now(),
-                        accuracy: 0,
-                        altitude: 0,
-                        heading: 0,
-                        speed: 0,
-                        speedAccuracy: 0,
-                      )
-                    : geo.Position(
-                        latitude: 5.3600,
-                        longitude: -4.0083,
-                        timestamp: DateTime.now(),
-                        accuracy: 0,
-                        altitude: 0,
-                        heading: 0,
-                        speed: 0,
-                        speedAccuracy: 0,
-                      )),
-            initialZoom: _is3DMode ? 18.0 : 15.0, // Zoom plus élevé en mode 3D
-            initialPitch: _is3DMode ? 60.0 : 0.0,
-            initialBearing: (_is3DMode && _currentBearing != null)
-                ? _currentBearing!
-                : 0.0,
+          OsmMapWidget(
+            initialCenter: _mapCenter(),
+            initialZoom: OsmConfig.defaultZoom,
             onMapCreated: _onMapCreated,
-          ),
-
-          // Bouton toggle mode 3D
-          Positioned(
-            top: 50,
-            right: 16,
-            child: FloatingActionButton(
-              mini: true,
-              backgroundColor: _is3DMode ? Colors.orange : Colors.grey[600],
-              onPressed: _toggle3DMode,
-              child: Icon(
-                _is3DMode ? Icons.view_in_ar : Icons.map,
-                color: Colors.white,
-              ),
-              tooltip: _is3DMode
-                  ? 'DÃ©sactiver le mode 3D'
-                  : 'Activer le mode 3D',
-            ),
+            markers: _buildMarkers(),
+            polylines: _routePoints.isEmpty
+                ? null
+                : [
+                    Polyline(
+                      points: _routePoints,
+                      color: Colors.blue,
+                      strokeWidth: 5,
+                    ),
+                  ],
           ),
 
           // Bottom sheet draggable avec les informations de commande
@@ -1294,4 +1185,3 @@ class _ActiveDeliveryScreenState extends State<ActiveDeliveryScreen> {
     return 0.0;
   }
 }
-

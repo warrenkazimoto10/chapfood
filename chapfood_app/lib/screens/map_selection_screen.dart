@@ -1,12 +1,14 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart' as geo;
+import 'package:latlong2/latlong.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart';
 
+import '../config/osm_config.dart';
 import '../constants/app_colors.dart';
 import '../services/address_service.dart';
-import '../services/nominatim_service.dart';
+import '../services/photon_geocoding_service.dart';
 import '../widgets/address_search_widget.dart';
 
 class MapSelectionScreen extends StatefulWidget {
@@ -25,7 +27,7 @@ class MapSelectionScreen extends StatefulWidget {
 }
 
 class _MapSelectionScreenState extends State<MapSelectionScreen> {
-  MapboxMap? _mapboxMap;
+  final MapController _mapController = MapController();
   bool _isMapLoading = true;
   geo.Position? _currentPosition;
   String _selectedAddress = '';
@@ -116,21 +118,22 @@ class _MapSelectionScreenState extends State<MapSelectionScreen> {
         _isMapLoading = false;
       });
 
-      if (_mapboxMap != null) {
-        _mapboxMap!.flyTo(
-          CameraOptions(
-            center: Point(
-              coordinates: Position(position.longitude, position.latitude),
-            ),
-            zoom: 16.0,
-          ),
-          MapAnimationOptions(duration: 1000),
-        );
-        // Les coordonnées seront mises à jour par le timer
-      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _initMapCenter();
+      });
+
+      _mapController.move(LatLng(position.latitude, position.longitude), 16.0);
     } catch (e) {
       print('Erreur lors de la récupération de la position: $e');
-      setState(() => _isMapLoading = false);
+      setState(() {
+        _isMapLoading = false;
+        _selectedLatitude = OsmConfig.defaultLat;
+        _selectedLongitude = OsmConfig.defaultLng;
+        _selectedAddress = 'Grand-Bassam';
+      });
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _initMapCenter();
+      });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Erreur de localisation: $e'),
@@ -140,90 +143,48 @@ class _MapSelectionScreenState extends State<MapSelectionScreen> {
     }
   }
 
-  Future<void> _onMapCreated(MapboxMap mapboxMap) async {
-    _mapboxMap = mapboxMap;
+  void _onPositionChanged(MapPosition position, bool hasGesture) {
+    if (!mounted) return;
+    final center = position.center;
+    if (center == null) return;
+    setState(() {
+      _selectedLatitude = center.latitude;
+      _selectedLongitude = center.longitude;
+      if (_selectedAddress.isEmpty ||
+          _selectedAddress.contains('Position sélectionnée') ||
+          _selectedAddress.contains('(')) {
+        _selectedAddress = 'Chargement de l\'adresse...';
+      }
+    });
+    final now = DateTime.now();
+    if (_lastReverseGeocodeTime == null ||
+        now.difference(_lastReverseGeocodeTime!).inSeconds >= 2) {
+      _lastReverseGeocodeTime = now;
+      _updateAddressFromCoordinates(center.latitude, center.longitude);
+    }
+  }
 
-    mapboxMap.gestures.updateSettings(
-      GesturesSettings(
-        rotateEnabled: true,
-        scrollEnabled: true,
-        pinchToZoomEnabled: true,
-        doubleTapToZoomInEnabled: true,
-        scrollDecelerationEnabled: true,
-      ),
-    );
-
-    // Démarrer le timer pour mettre à jour les coordonnées périodiquement
-    _startCoordinateUpdateTimer();
-
+  void _initMapCenter() {
     if (_currentPosition != null) {
-      mapboxMap.flyTo(
-        CameraOptions(
-          center: Point(
-            coordinates: Position(
-              _currentPosition!.longitude,
-              _currentPosition!.latitude,
-            ),
-          ),
-          zoom: 16.0,
-        ),
-        MapAnimationOptions(duration: 1000),
+      _mapController.move(
+        LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
+        16.0,
       );
-
-      // Initialiser les coordonnées avec la position actuelle
       setState(() {
         _selectedLatitude = _currentPosition!.latitude;
         _selectedLongitude = _currentPosition!.longitude;
         _selectedAddress = 'Chargement de l\'adresse...';
       });
-
-      // Faire un reverse geocoding immédiat pour obtenir l'adresse
-      await _updateAddressFromCoordinates(
+      _updateAddressFromCoordinates(
         _currentPosition!.latitude,
         _currentPosition!.longitude,
       );
+    } else {
+      _mapController.move(
+        LatLng(OsmConfig.defaultLat, OsmConfig.defaultLng),
+        OsmConfig.defaultZoom,
+      );
     }
-  }
-
-  void _startCoordinateUpdateTimer() {
-    _updateTimer?.cancel();
-
-    _updateTimer = Timer.periodic(const Duration(milliseconds: 1000), (
-      timer,
-    ) async {
-      if (_mapboxMap != null) {
-        try {
-          final cameraState = await _mapboxMap!.getCameraState();
-          final center = cameraState.center;
-
-          if (mounted) {
-            final newLat = center.coordinates.lat.toDouble();
-            final newLng = center.coordinates.lng.toDouble();
-
-            setState(() {
-              _selectedLatitude = newLat;
-              _selectedLongitude = newLng;
-              // Afficher "Chargement..." pendant le reverse geocoding
-              if (_selectedAddress.isEmpty ||
-                  _selectedAddress.contains('Position sélectionnée') ||
-                  _selectedAddress.contains('(')) {
-                _selectedAddress = 'Chargement de l\'adresse...';
-              }
-            });
-
-            // Faire un reverse geocoding toutes les 2 secondes pour obtenir l'adresse
-            final now = DateTime.now();
-            if (_lastReverseGeocodeTime == null ||
-                now.difference(_lastReverseGeocodeTime!).inSeconds >= 2) {
-              _lastReverseGeocodeTime = now;
-              _updateAddressFromCoordinates(newLat, newLng);
-            }
-          }
-        } catch (e) {
-          // Ignorer les erreurs silencieusement
-        }
-      }
-    });
   }
 
   /// Met à jour l'adresse à partir des coordonnées GPS
@@ -234,59 +195,25 @@ class _MapSelectionScreenState extends State<MapSelectionScreen> {
     if (!mounted) return;
 
     try {
-      print('🔄 Reverse geocoding pour: $latitude, $longitude');
-      final reverseResult = await NominatimService.reverse(latitude, longitude);
+      final reverseResult = await PhotonGeocodingService.reverse(
+        latitude,
+        longitude,
+      );
 
       if (reverseResult != null && mounted) {
-        // Essayer d'abord getFormattedAddress()
         var address = reverseResult.getFormattedAddress();
-        print('✅ Adresse formatée: $address');
-
-        // Si l'adresse est vide ou ne contient que "Grand-Bassam", utiliser display_name
         if (address.isEmpty ||
             address == 'Grand-Bassam' ||
             address.trim().length < 5) {
-          // Extraire les parties importantes du display_name
-          final displayParts = reverseResult.displayName.split(',');
-          final result = <String>[];
-
-          // Prendre le premier élément (nom du lieu si disponible)
-          if (displayParts.isNotEmpty && displayParts[0].trim().isNotEmpty) {
-            result.add(displayParts[0].trim());
-          }
-
-          // Chercher le quartier ou la route
-          for (int i = 1; i < displayParts.length && result.length < 3; i++) {
-            final part = displayParts[i].trim();
-            if (part.isNotEmpty &&
-                !part.toLowerCase().contains('côte') &&
-                !part.toLowerCase().contains('comoé') &&
-                !part.toLowerCase().contains('sud-comoé') &&
-                !part.toLowerCase().contains('commune')) {
-              result.add(part);
-              if (result.length >= 2) break; // Prendre max 2 parties
-            }
-          }
-
-          if (result.isNotEmpty) {
-            address = result.join(', ');
-          } else {
-            address = reverseResult.displayName
-                .split(',')
-                .take(2)
-                .join(', ')
-                .trim();
-          }
+          address = reverseResult.displayName;
+          if (address.isEmpty) address = 'Grand-Bassam';
         }
-
         if (mounted && address.isNotEmpty) {
           setState(() {
             _selectedAddress = address;
           });
-          print('✅ Adresse finale affichée: $address');
         }
       } else {
-        print('⚠️ Aucun résultat reverse geocoding');
         if (mounted) {
           setState(() {
             _selectedAddress = 'Grand-Bassam';
@@ -294,9 +221,7 @@ class _MapSelectionScreenState extends State<MapSelectionScreen> {
         }
       }
     } catch (e) {
-      print('❌ Erreur reverse geocoding: $e');
       if (mounted) {
-        // En cas d'erreur, au moins afficher quelque chose de lisible
         setState(() {
           _selectedAddress = 'Grand-Bassam';
         });
@@ -403,37 +328,18 @@ class _MapSelectionScreenState extends State<MapSelectionScreen> {
       _selectedAddress = address; // Utiliser l'adresse de la recherche d'abord
     });
 
-    // Centrer la carte sur l'adresse sélectionnée
-    if (_mapboxMap != null) {
-      _mapboxMap!.flyTo(
-        CameraOptions(
-          center: Point(coordinates: Position(longitude, latitude)),
-          zoom: 17.0,
-        ),
-        MapAnimationOptions(duration: 1000),
-      );
-    }
+    _mapController.move(LatLng(latitude, longitude), 17.0);
 
     // Améliorer l'adresse avec reverse geocoding pour plus de détails
     await _updateAddressFromCoordinates(latitude, longitude);
   }
 
   Future<void> _goToMyLocation() async {
-    if (_currentPosition != null && _mapboxMap != null) {
-      _mapboxMap!.flyTo(
-        CameraOptions(
-          center: Point(
-            coordinates: Position(
-              _currentPosition!.longitude,
-              _currentPosition!.latitude,
-            ),
-          ),
-          zoom: 16.0,
-        ),
-        MapAnimationOptions(duration: 1000),
+    if (_currentPosition != null) {
+      _mapController.move(
+        LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
+        16.0,
       );
-
-      // Les coordonnées seront mises à jour automatiquement par le timer
     } else {
       await _getCurrentLocation();
     }
@@ -652,20 +558,38 @@ class _MapSelectionScreenState extends State<MapSelectionScreen> {
           else
             Stack(
               children: [
-                MapWidget(
-                  styleUri: MapboxStyles.MAPBOX_STREETS,
-                  cameraOptions: CameraOptions(
-                    center: _currentPosition != null
-                        ? Point(
-                            coordinates: Position(
-                              _currentPosition!.longitude,
-                              _currentPosition!.latitude,
-                            ),
+                FlutterMap(
+                  mapController: _mapController,
+                  options: MapOptions(
+                    initialCenter: _currentPosition != null
+                        ? LatLng(
+                            _currentPosition!.latitude,
+                            _currentPosition!.longitude,
                           )
-                        : Point(coordinates: Position(-4.036, 5.356)),
-                    zoom: 15.0,
+                        : LatLng(OsmConfig.defaultLat, OsmConfig.defaultLng),
+                    initialZoom: OsmConfig.defaultZoom,
+                    onPositionChanged: _onPositionChanged,
+                    interactionOptions: const InteractionOptions(
+                      flags: InteractiveFlag.all,
+                    ),
                   ),
-                  onMapCreated: _onMapCreated,
+                  children: [
+                    TileLayer(
+                      urlTemplate: OsmConfig.tileUrlTemplate,
+                      userAgentPackageName: 'com.chapfood.app',
+                      maxZoom: 19,
+                    ),
+                    RichAttributionWidget(
+                      animationConfig: const ScaleRAWA(),
+                      showFlutterMapAttribution: false,
+                      attributions: [
+                        TextSourceAttribution(
+                          'OpenStreetMap contributors',
+                          prependCopyright: true,
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
                 // Curseur fixe au centre de la carte
                 Center(
@@ -759,7 +683,7 @@ class _MapSelectionScreenState extends State<MapSelectionScreen> {
                 ),
               ),
             ),
-            ),
+          ),
 
           // Boutons de contrôle
           Positioned(
@@ -788,19 +712,19 @@ class _MapSelectionScreenState extends State<MapSelectionScreen> {
 
           // Adresse sélectionnée en bas (simplifié)
           if (_selectedAddress.isNotEmpty && _selectedLatitude != null)
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
               child: SafeArea(
-            child: Container(
+                child: Container(
                   margin: const EdgeInsets.all(16),
                   padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: AppColors.getCardColor(context),
+                  decoration: BoxDecoration(
+                    color: AppColors.getCardColor(context),
                     borderRadius: BorderRadius.circular(16),
-                boxShadow: [
-                  BoxShadow(
+                    boxShadow: [
+                      BoxShadow(
                         color: Colors.black.withOpacity(0.2),
                         blurRadius: 15,
                         offset: const Offset(0, 5),
@@ -838,15 +762,15 @@ class _MapSelectionScreenState extends State<MapSelectionScreen> {
                               ),
                               maxLines: 2,
                               overflow: TextOverflow.ellipsis,
-                                ),
-                              ],
                             ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
+                    ],
+                  ),
+                ),
               ),
             ),
-          ),
         ],
       ),
     );

@@ -2,7 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../constants/app_colors.dart';
-import '../services/nominatim_service.dart';
+import '../services/photon_geocoding_service.dart';
 
 /// Widget de recherche d'adresses avec autocomplete utilisant Nominatim
 class AddressSearchWidget extends StatefulWidget {
@@ -26,7 +26,7 @@ class _AddressSearchWidgetState extends State<AddressSearchWidget> {
   final TextEditingController _searchController = TextEditingController();
   final FocusNode _focusNode = FocusNode();
   Timer? _debounceTimer;
-  List<NominatimResult> _results = [];
+  List<PhotonResult> _results = [];
   bool _isSearching = false;
   bool _showResults = false;
   int _selectedIndex = -1;
@@ -82,14 +82,8 @@ class _AddressSearchWidgetState extends State<AddressSearchWidget> {
     if (!mounted) return;
 
     try {
-      print('🔍 Recherche Nominatim: "$query"');
-      final results = await NominatimService.search(
-        query,
-        limit: 10, // Augmenter à 10 résultats
-        countryCodes: 'ci',
-      );
+      final results = await PhotonGeocodingService.search(query, limit: 10);
 
-      print('✅ ${results.length} résultats trouvés');
       if (mounted) {
         setState(() {
           _results = results;
@@ -108,7 +102,7 @@ class _AddressSearchWidgetState extends State<AddressSearchWidget> {
     }
   }
 
-  void _selectResult(NominatimResult result) {
+  void _selectResult(PhotonResult result) {
     _searchController.text = result.getFormattedAddress();
     _focusNode.unfocus();
 

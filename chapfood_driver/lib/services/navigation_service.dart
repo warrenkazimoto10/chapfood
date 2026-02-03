@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
-import 'mapbox_routing_service.dart';
+import 'osrm_routing_service.dart';
 
 /// Service pour gérer le mode navigation avec itinéraire et caméra 3D
 class NavigationService {
@@ -56,18 +56,17 @@ class NavigationService {
     double endLng,
   ) async {
     try {
-      // Utiliser Mapbox Directions API via MapboxRoutingService
-      final routeInfo = await MapboxRoutingService.getRoute(
-        startLat: startLat,
-        startLng: startLng,
-        endLat: endLat,
-        endLng: endLng,
+      // Utiliser OSRM (OpenStreetMap) pour le routage
+      final routeInfo = await OsrmRoutingService.getRouteWithInfo(
+        originLat: startLat,
+        originLng: startLng,
+        destLat: endLat,
+        destLng: endLng,
       );
 
       if (routeInfo != null && routeInfo.coordinates.isNotEmpty) {
-        // Convertir les coordonnées Position en format Map
         _currentRoute = routeInfo.coordinates
-            .map((position) => {'latitude': position.lat, 'longitude': position.lng})
+            .map((p) => {'latitude': p.latitude, 'longitude': p.longitude})
             .toList();
 
         print('🛣️ Itinéraire calculé: ${_currentRoute.length} points');
